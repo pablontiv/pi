@@ -18,6 +18,7 @@ import {
 	type DefaultProjectTrust,
 	type FullscreenExitOutput,
 	type MermaidRenderingMode,
+	type ToolRowsMode,
 	type TuiMode,
 	type WarningSettings,
 } from "../../../core/settings-manager.ts";
@@ -70,7 +71,7 @@ export interface SettingsConfig {
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
-	hideToolRows: boolean;
+	toolRowsMode: ToolRowsMode;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
@@ -109,7 +110,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
-	onHideToolRowsChange: (hidden: boolean) => void;
+	onToolRowsModeChange: (mode: ToolRowsMode) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
@@ -517,11 +518,11 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
-				id: "hide-tool-rows",
-				label: "Hide tool rows",
-				description: "Hide tool calls and results from the interactive transcript",
-				currentValue: config.hideToolRows ? "true" : "false",
-				values: ["true", "false"],
+				id: "tool-rows-mode",
+				label: "Tool rows",
+				description: "Show full tool output, one compact status line, or hide tool rows",
+				currentValue: config.toolRowsMode,
+				values: ["full", "compact", "hidden"],
 			},
 			{
 				id: "mermaid-rendering",
@@ -890,8 +891,8 @@ export class SettingsSelectorComponent extends Container {
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
-					case "hide-tool-rows":
-						callbacks.onHideToolRowsChange(newValue === "true");
+					case "tool-rows-mode":
+						callbacks.onToolRowsModeChange(newValue as ToolRowsMode);
 						break;
 					case "mermaid-rendering":
 						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);

@@ -309,13 +309,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// Tool expansion not supported in RPC mode - no TUI
 		},
 
-		getToolRowsVisible() {
-			// Tool-row visibility is not supported in RPC mode - no TUI
-			return true;
+		getToolRowsMode() {
+			// Tool-row display modes are not supported in RPC mode - no TUI
+			return "full";
 		},
 
-		setToolRowsVisible(_visible: boolean) {
-			// Tool-row visibility is not supported in RPC mode - no TUI
+		setToolRowsMode(_mode) {
+			// Tool-row display modes are not supported in RPC mode - no TUI
 		},
 	});
 

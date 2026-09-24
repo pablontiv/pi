@@ -199,7 +199,7 @@ Guard terminal-only behavior with `ctx.mode === "tui"` and use `ctx.hasUI` for i
 
 Keep tool and event behavior independent from rendering so non-interactive modes remain functional.
 
-`ctx.ui.getToolRowsVisible()` and `ctx.ui.setToolRowsVisible(visible)` control only interactive transcript rendering. They do not change tool execution, results, errors, session entries, or model context. In RPC, JSON, and print modes, the getter returns `true` and the setter is a no-op; guard behavior that needs a visible change with `ctx.mode === "tui"`.
+`ctx.ui.getToolRowsMode()` and `ctx.ui.setToolRowsMode(mode)` control only interactive transcript rendering. Modes are `"full"`, `"compact"` (one call-header line with running/success/error status), and `"hidden"`. They do not change tool execution, results, errors, session entries, or model context. In RPC, JSON, and print modes, the getter returns `"full"` and the setter is a no-op; guard behavior that needs a visible change with `ctx.mode === "tui"`.
 
 <a id="error-handling"></a>
 <a id="handle-errors-and-shutdown"></a>

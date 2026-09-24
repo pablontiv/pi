@@ -20,7 +20,7 @@ To include files or images:
 
 ## Follow Pi's work
 
-Pi shows each tool call and result while it works. Press `Ctrl+O` to expand or collapse tool output, or `Ctrl+Alt+O` to hide or restore complete tool rows without changing execution. Press `Ctrl+T` to show or hide thinking blocks.
+Pi shows each tool call and result while it works. Press `Ctrl+O` to expand or collapse tool output. Press `Ctrl+Alt+O` to cycle tool rows through full output, one compact call-header/status line, and hidden rows without changing execution. Press `Ctrl+T` to show or hide thinking blocks.
 
 The startup header lists the instructions and resources Pi loaded. The editor border indicates the current thinking level. The footer updates as the model uses context and reports usage.
 

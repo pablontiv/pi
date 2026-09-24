@@ -227,28 +227,35 @@ describe("InteractiveMode tool-row visibility", () => {
 		chatContainer.addChild(textComponent);
 		chatContainer.addChild(failedComponent);
 		const fakeThis = {
-			hideToolRows: false,
+			toolRowsMode: "full" as const,
 			chatContainer,
 			ui: { requestRender: vi.fn() },
 		};
-		const setToolRowsVisible = (
+		expect("setToolRowsMode" in InteractiveMode.prototype).toBe(true);
+		const setToolRowsMode = (
 			InteractiveMode as unknown as {
-				prototype: { setToolRowsVisible(this: typeof fakeThis, visible: boolean): void };
+				prototype: {
+					setToolRowsMode(this: typeof fakeThis, mode: "full" | "compact" | "hidden"): void;
+				};
 			}
-		).prototype.setToolRowsVisible;
+		).prototype.setToolRowsMode;
 
 		expect(renderAll(chatContainer)).toContain("Thinking...");
-		setToolRowsVisible.call(fakeThis, false);
+		setToolRowsMode.call(fakeThis, "compact");
+		expect(component.render(120)).not.toEqual([]);
+		expect(renderAll(chatContainer)).toContain("Thinking...");
+
+		setToolRowsMode.call(fakeThis, "hidden");
 		expect(component.render(120)).toEqual([]);
 		expect(activeThinkingComponent.render(120).join("\n")).toContain("Thinking...");
 		expect(textComponent.render(120).join("\n")).toContain("I will inspect the file.");
 		expect(failedComponent.render(120)).not.toEqual([]);
 
-		setToolRowsVisible.call(fakeThis, true);
+		setToolRowsMode.call(fakeThis, "full");
 		expect(renderAll(chatContainer)).toContain("Thinking...");
 	});
 
-	test("hides and restores rows while persisting the preference", () => {
+	test("cycles full, compact, and hidden modes while persisting the preference", () => {
 		initTheme("dark");
 		const component = new ToolExecutionComponent(
 			"tool",
@@ -262,42 +269,82 @@ describe("InteractiveMode tool-row visibility", () => {
 		const chatContainer = new Container();
 		chatContainer.addChild(component);
 		const fakeThis = {
-			hideToolRows: false,
+			toolRowsMode: "full" as "full" | "compact" | "hidden",
 			chatContainer,
-			settingsManager: { setHideToolRows: vi.fn() },
+			settingsManager: { setToolRowsMode: vi.fn() },
 			ui: { requestRender: vi.fn() },
 			showStatus: vi.fn(),
 		};
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		expect("cycleToolRowsMode" in InteractiveMode.prototype).toBe(true);
+		const cycleToolRowsMode = (
+			InteractiveMode as unknown as {
+				prototype: { cycleToolRowsMode(this: typeof fakeThis): void };
+			}
+		).prototype.cycleToolRowsMode;
 
-		(InteractiveMode as any).prototype.toggleToolRowsVisibility.call(fakeThis);
+		cycleToolRowsMode.call(fakeThis);
+		expect(component.render(120)).toHaveLength(1);
+		expect(fakeThis.settingsManager.setToolRowsMode).toHaveBeenLastCalledWith("compact");
+		expect(fakeThis.showStatus).toHaveBeenLastCalledWith("Tool rows: compact");
 
+		cycleToolRowsMode.call(fakeThis);
 		expect(component.render(120)).toEqual([]);
-		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenCalledWith(true);
-		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool rows: hidden");
+		expect(fakeThis.settingsManager.setToolRowsMode).toHaveBeenLastCalledWith("hidden");
 
-		(InteractiveMode as any).prototype.toggleToolRowsVisibility.call(fakeThis);
-
-		expect(component.render(120)).not.toEqual([]);
-		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenLastCalledWith(false);
+		cycleToolRowsMode.call(fakeThis);
+		expect(component.render(120).length).toBeGreaterThan(1);
+		expect(fakeThis.settingsManager.setToolRowsMode).toHaveBeenLastCalledWith("full");
 	});
 });
 
 describe("InteractiveMode.createExtensionUIContext tool rows", () => {
-	test("exposes tool-row visibility controls", () => {
+	test("exposes tool-row mode controls", () => {
 		const fakeThis = {
-			hideToolRows: false,
-			setToolRowsVisible: vi.fn(),
-			settingsManager: { setHideToolRows: vi.fn() },
+			toolRowsMode: "compact" as "full" | "compact" | "hidden",
+			setToolRowsMode: vi.fn(),
+			settingsManager: { setToolRowsMode: vi.fn() },
 		};
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		const createExtensionUIContext = (
+			InteractiveMode as unknown as {
+				prototype: { createExtensionUIContext(this: typeof fakeThis): unknown };
+			}
+		).prototype.createExtensionUIContext;
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = createExtensionUIContext.call(fakeThis);
 
-		expect(uiContext.getToolRowsVisible()).toBe(true);
-		uiContext.setToolRowsVisible(false);
-		expect(fakeThis.setToolRowsVisible).toHaveBeenCalledWith(false);
-		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenCalledWith(true);
+		expect(typeof uiContext === "object" && uiContext !== null && "getToolRowsMode" in uiContext).toBe(true);
+		const modeContext = uiContext as {
+			getToolRowsMode(): "full" | "compact" | "hidden";
+			setToolRowsMode(mode: "full" | "compact" | "hidden"): void;
+		};
+		expect(modeContext.getToolRowsMode()).toBe("compact");
+		modeContext.setToolRowsMode("hidden");
+		expect(fakeThis.setToolRowsMode).toHaveBeenCalledWith("hidden");
+		expect(fakeThis.settingsManager.setToolRowsMode).toHaveBeenCalledWith("hidden");
+	});
+
+	test("ignores invalid tool-row modes from untyped extensions", () => {
+		const fakeThis = {
+			toolRowsMode: "full" as "full" | "compact" | "hidden",
+			setToolRowsMode: vi.fn(),
+			settingsManager: { setToolRowsMode: vi.fn() },
+		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		const createExtensionUIContext = (
+			InteractiveMode as unknown as {
+				prototype: {
+					createExtensionUIContext(this: typeof fakeThis): { setToolRowsMode(mode: string): void };
+				};
+			}
+		).prototype.createExtensionUIContext;
+		const uiContext = createExtensionUIContext.call(fakeThis);
+
+		uiContext.setToolRowsMode("invalid");
+
+		expect(fakeThis.setToolRowsMode).not.toHaveBeenCalled();
+		expect(fakeThis.settingsManager.setToolRowsMode).not.toHaveBeenCalled();
 	});
 });
 

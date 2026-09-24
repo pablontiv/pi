@@ -73,6 +73,7 @@ import type {
 	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
+import type { ToolRowsMode } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -292,11 +293,11 @@ export interface ExtensionUIContext {
 	/** Set tool output expansion state. */
 	setToolsExpanded(expanded: boolean): void;
 
-	/** Return whether interactive tool-call rows are visible. Non-TUI modes return true. */
-	getToolRowsVisible(): boolean;
+	/** Return the interactive tool-row display mode. Non-TUI modes return "full". */
+	getToolRowsMode(): ToolRowsMode;
 
-	/** Set interactive tool-call row visibility. Non-TUI modes ignore this call. */
-	setToolRowsVisible(visible: boolean): void;
+	/** Set the interactive tool-row display mode. Non-TUI modes ignore this call. */
+	setToolRowsMode(mode: ToolRowsMode): void;
 }
 
 // ============================================================================

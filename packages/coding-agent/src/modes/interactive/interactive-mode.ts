@@ -108,7 +108,12 @@ import {
 	sessionEntryToContextMessages,
 	type UsageEntry,
 } from "../../core/session-manager.ts";
-import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
+import {
+	type FullscreenExitOutput,
+	TOOL_ROWS_MODES,
+	type ToolRowsMode,
+	type TuiMode,
+} from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -476,7 +481,7 @@ export class InteractiveMode {
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
-	private hideToolRows = false;
+	private toolRowsMode: ToolRowsMode = "full";
 	private outputPad = 1;
 	private readonly mermaidMarkdownTransformer: MarkdownTransformer = createMermaidMarkdownTransformer({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
@@ -617,7 +622,7 @@ export class InteractiveMode {
 
 		// Load transcript visibility settings
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-		this.hideToolRows = this.settingsManager.getHideToolRows();
+		this.toolRowsMode = this.settingsManager.getToolRowsMode();
 		this.outputPad = this.settingsManager.getOutputPad();
 
 		// Register themes from resource loader and initialize
@@ -2003,7 +2008,7 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-		this.hideToolRows = this.settingsManager.getHideToolRows();
+		this.toolRowsMode = this.settingsManager.getToolRowsMode();
 		this.outputPad = this.settingsManager.getOutputPad();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		const clearOnShrink = this.settingsManager.getClearOnShrink();
@@ -2588,10 +2593,11 @@ export class InteractiveMode {
 			},
 			getToolsExpanded: () => this.toolOutputExpanded,
 			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
-			getToolRowsVisible: () => !this.hideToolRows,
-			setToolRowsVisible: (visible) => {
-				this.setToolRowsVisible(visible);
-				this.settingsManager.setHideToolRows(!visible);
+			getToolRowsMode: () => this.toolRowsMode,
+			setToolRowsMode: (mode) => {
+				if (!TOOL_ROWS_MODES.includes(mode)) return;
+				this.setToolRowsMode(mode);
+				this.settingsManager.setToolRowsMode(mode);
 			},
 		};
 	}
@@ -3011,7 +3017,7 @@ export class InteractiveMode {
 		this.ui.onDebug = () => this.handleDebugCommand();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
-		this.defaultEditor.onAction("app.tools.toggleVisibility", () => this.toggleToolRowsVisibility());
+		this.defaultEditor.onAction("app.tools.toggleVisibility", () => this.cycleToolRowsMode());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
 		this.defaultEditor.onAction(
@@ -3401,7 +3407,7 @@ export class InteractiveMode {
 						this.outputPad,
 						this.getMarkdownTransformers(),
 					);
-					this.streamingComponent.setToolRowsVisible(!this.hideToolRows);
+					this.streamingComponent.setToolRowsVisible(this.toolRowsMode !== "hidden");
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
@@ -3430,7 +3436,7 @@ export class InteractiveMode {
 									this.sessionManager.getCwd(),
 								);
 								component.setExpanded(this.toolOutputExpanded);
-								component.setVisible(!this.hideToolRows);
+								component.setToolRowsMode(this.toolRowsMode);
 								this.chatContainer.addChild(component);
 								this.pendingTools.set(content.id, component);
 							} else {
@@ -3507,7 +3513,7 @@ export class InteractiveMode {
 						this.sessionManager.getCwd(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					component.setVisible(!this.hideToolRows);
+					component.setToolRowsMode(this.toolRowsMode);
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
@@ -3843,7 +3849,7 @@ export class InteractiveMode {
 					this.outputPad,
 					this.getMarkdownTransformers(),
 				);
-				assistantComponent.setToolRowsVisible(!this.hideToolRows);
+				assistantComponent.setToolRowsVisible(this.toolRowsMode !== "hidden");
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -3908,7 +3914,7 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						component.setVisible(!this.hideToolRows);
+						component.setToolRowsMode(this.toolRowsMode);
 						this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
@@ -4413,22 +4419,24 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
-	private setToolRowsVisible(visible: boolean): void {
-		this.hideToolRows = !visible;
+	private setToolRowsMode(mode: ToolRowsMode): void {
+		this.toolRowsMode = mode;
 		for (const child of this.chatContainer.children) {
 			if (child instanceof ToolExecutionComponent) {
-				child.setVisible(visible);
+				child.setToolRowsMode(mode);
 			} else if (child instanceof AssistantMessageComponent) {
-				child.setToolRowsVisible(visible);
+				child.setToolRowsVisible(mode !== "hidden");
 			}
 		}
 		this.ui.requestRender();
 	}
 
-	private toggleToolRowsVisibility(): void {
-		this.setToolRowsVisible(this.hideToolRows);
-		this.settingsManager.setHideToolRows(this.hideToolRows);
-		this.showStatus(`Tool rows: ${this.hideToolRows ? "hidden" : "visible"}`);
+	private cycleToolRowsMode(): void {
+		const currentIndex = TOOL_ROWS_MODES.indexOf(this.toolRowsMode);
+		const mode = TOOL_ROWS_MODES[(currentIndex + 1) % TOOL_ROWS_MODES.length] ?? "full";
+		this.setToolRowsMode(mode);
+		this.settingsManager.setToolRowsMode(mode);
+		this.showStatus(`Tool rows: ${mode}`);
 	}
 
 	private setToolsExpanded(expanded: boolean): void {
@@ -4803,7 +4811,7 @@ export class InteractiveMode {
 					terminalTheme: this.themeController.getTerminalTheme(),
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
-					hideToolRows: this.hideToolRows,
+					toolRowsMode: this.toolRowsMode,
 					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
@@ -4905,9 +4913,9 @@ export class InteractiveMode {
 						this.settingsManager.setHideThinkingBlock(hidden);
 						this.updateThinkingBlockVisibility();
 					},
-					onHideToolRowsChange: (hidden) => {
-						this.setToolRowsVisible(!hidden);
-						this.settingsManager.setHideToolRows(hidden);
+					onToolRowsModeChange: (mode) => {
+						this.setToolRowsMode(mode);
+						this.settingsManager.setToolRowsMode(mode);
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);
@@ -6252,7 +6260,7 @@ export class InteractiveMode {
 				return;
 			}
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-			this.hideToolRows = this.settingsManager.getHideToolRows();
+			this.toolRowsMode = this.settingsManager.getToolRowsMode();
 			this.outputPad = this.settingsManager.getOutputPad();
 			this.rebuildChatFromMessages();
 			chatRestoredBeforeSessionStart = true;

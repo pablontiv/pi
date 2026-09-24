@@ -10,8 +10,11 @@ import {
 	Text,
 	type TUI,
 	type TuiMouseEvent,
+	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
+import type { ToolRowsMode } from "../../../core/settings-manager.ts";
 import type { Theme } from "../theme/theme.ts";
 
 /**
@@ -33,6 +36,7 @@ export interface ToolRenderers {
 }
 
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -77,7 +81,7 @@ export class ToolExecutionComponent extends Container {
 		{ sourceData: string; sourceMimeType: string; data: string; mimeType: string }
 	> = new Map();
 	private hideComponent = false;
-	private visible = true;
+	private toolRowsMode: ToolRowsMode = "full";
 
 	constructor(
 		toolName: string,
@@ -247,9 +251,9 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	setVisible(visible: boolean): void {
-		if (this.visible === visible) return;
-		this.visible = visible;
+	setToolRowsMode(mode: ToolRowsMode): void {
+		if (this.toolRowsMode === mode) return;
+		this.toolRowsMode = mode;
 		this.invalidate();
 	}
 
@@ -269,8 +273,23 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.visible || this.hideComponent) {
+		if (this.toolRowsMode === "hidden" || this.hideComponent) {
 			return [];
+		}
+		if (this.toolRowsMode === "compact") {
+			let status = theme.fg("muted", "[running]");
+			if (this.result && !this.isPartial) {
+				status = this.result.isError ? theme.fg("error", "[error]") : theme.fg("success", "[ok]");
+			}
+			const availableWidth = Math.max(0, width - visibleWidth(status) - 1);
+			const renderedCall = this.callRendererComponent?.render(width) ?? [];
+			let callLine = renderedCall.find((line) => stripAnsi(line).trim().length > 0);
+			if (!callLine) {
+				const serializedArgs = JSON.stringify(this.args);
+				callLine = `${this.toolName}${serializedArgs ? ` ${serializedArgs}` : ""}`;
+			}
+			const header = theme.fg("toolTitle", truncateToWidth(stripAnsi(callLine).trim(), availableWidth, "..."));
+			return [visibleWidth(header) > 0 ? `${header} ${status}` : status];
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {

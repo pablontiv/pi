@@ -135,4 +135,23 @@ describe("SettingsSelectorComponent", () => {
 		expect(output).toContain("  ✓ medium");
 		expect(output).toContain("→   high");
 	});
+
+	it("cycles the configured tool-row mode", () => {
+		const onToolRowsModeChange = vi.fn();
+		const config = {
+			toolRowsMode: "compact",
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+		} as unknown as SettingsConfig;
+		const callbacks = { onToolRowsModeChange, onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		list.selectItem("tool-rows-mode");
+
+		list.handleInput(" ");
+		expect(onToolRowsModeChange).toHaveBeenCalledWith("hidden");
+	});
 });

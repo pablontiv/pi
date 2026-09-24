@@ -156,7 +156,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 
-		component.setVisible(false);
+		component.setToolRowsMode("hidden");
 
 		expect(component.render(120)).toEqual([]);
 	});
@@ -172,13 +172,120 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 
-		component.setVisible(false);
+		component.setToolRowsMode("hidden");
 		component.updateResult({ content: [{ type: "text", text: "final result" }], isError: false });
 		expect(component.render(120)).toEqual([]);
 
-		component.setVisible(true);
+		component.setToolRowsMode("full");
 
 		expect(stripAnsi(component.render(120).join("\n"))).toContain("final result");
+	});
+
+	test("renders one call-header line with running status in compact mode", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call\ncall detail", 0, 0),
+			renderResult: () => new Text("secret result", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-running",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		expect("setToolRowsMode" in component).toBe(true);
+		(component as unknown as { setToolRowsMode(mode: "compact"): void }).setToolRowsMode("compact");
+
+		const lines = component.render(120);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "").trim()).toBe("custom call [running]");
+	});
+
+	test("does not serialize arguments when a compact call header is available", () => {
+		const args: Record<string, unknown> = {};
+		args.self = args;
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-rendered-call",
+			args,
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("custom call [running]");
+	});
+
+	test.each([
+		{ isError: false, status: "[ok]" },
+		{ isError: true, status: "[error]" },
+	])("shows $status and hides completed output in compact mode", ({ isError, status }) => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+			renderResult: () => new Text("secret result", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			`tool-compact-${status}`,
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		component.updateResult({ content: [{ type: "text", text: "secret result" }], isError }, false);
+
+		const lines = component.render(120);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "").trim()).toBe(`custom call ${status}`);
+		expect(stripAnsi(lines.join("\n"))).not.toContain("secret result");
+	});
+
+	test("keeps generic tool arguments and status visible on a compact row", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-fallback",
+			{ path: "a-very-long-file-name.txt" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		const lines = component.render(48);
+
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "")).toContain('custom_tool {"path":"a-very-long');
+		expect(stripAnsi(lines[0] ?? "").trimEnd()).toMatch(/\.\.\. \[running\]$/);
+	});
+
+	test("omits the header separator when only compact status fits", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-narrow",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		expect(stripAnsi(component.render(4)[0] ?? "")).toBe("[running]");
 	});
 
 	test("uses built-in rendering for built-in overrides without custom renderers", () => {

@@ -516,17 +516,32 @@ describe("SettingsManager", () => {
 		expect(reloadedManager.getFullscreenCopyOnSelect()).toBe(true);
 	});
 
-	describe("hideToolRows", () => {
-		it("defaults to visible rows and persists hiding", async () => {
+	describe("toolRowsMode", () => {
+		it("defaults to full rows and persists compact mode", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getHideToolRows()).toBe(false);
+			expect("getToolRowsMode" in manager).toBe(true);
+			const modeManager = manager as unknown as {
+				getToolRowsMode(): "full" | "compact" | "hidden";
+				setToolRowsMode(mode: "full" | "compact" | "hidden"): void;
+			};
+			expect(modeManager.getToolRowsMode()).toBe("full");
 
-			manager.setHideToolRows(true);
+			modeManager.setToolRowsMode("compact");
 			await manager.flush();
 
-			expect(manager.getHideToolRows()).toBe(true);
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).hideToolRows).toBe(true);
+			expect(modeManager.getToolRowsMode()).toBe("compact");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).toolRowsMode).toBe("compact");
+		});
+
+		it("falls back to full rows for unsupported values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ toolRowsMode: "sometimes" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect("getToolRowsMode" in manager).toBe(true);
+			expect((manager as unknown as { getToolRowsMode(): "full" | "compact" | "hidden" }).getToolRowsMode()).toBe(
+				"full",
+			);
 		});
 	});
 

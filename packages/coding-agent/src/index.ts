@@ -303,6 +303,8 @@ export {
 	type RetrySettings,
 	SettingsManager,
 	type SettingsManagerCreateOptions,
+	TOOL_ROWS_MODES,
+	type ToolRowsMode,
 	type TuiMode,
 } from "./core/settings-manager.ts";
 // Skills

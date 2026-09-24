@@ -161,7 +161,7 @@ On native Windows, `app.suspend` has no default because Windows terminals do not
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
-| `app.tools.toggleVisibility` | `ctrl+alt+o` | Show or hide complete tool-call and tool-result rows |
+| `app.tools.toggleVisibility` | `ctrl+alt+o` | Cycle tool rows through full, compact, and hidden modes |
 | `app.message.copy` | `ctrl+x` | Copy the selected message in `/tree`; in fullscreen mode, copy the active selection when `fullscreenCopyOnSelect` is `false`; otherwise copy the last assistant message |
 | `app.message.followUp` | `alt+enter` (`ctrl+q` on Windows and WSL) | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` (`alt+q` on Windows and WSL) | Restore queued messages to editor |

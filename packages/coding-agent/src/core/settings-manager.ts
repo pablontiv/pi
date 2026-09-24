@@ -73,6 +73,9 @@ export interface ThinkingBudgetsSettings {
 
 export type MermaidRenderingMode = "off" | "final" | "streaming";
 
+export const TOOL_ROWS_MODES = ["full", "compact", "hidden"] as const;
+export type ToolRowsMode = (typeof TOOL_ROWS_MODES)[number];
+
 /** Cache-warming profile. "idle" also warms between agent runs. */
 export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
 export type CacheWarmingMode = (typeof CACHE_WARMING_MODES)[number];
@@ -121,7 +124,7 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
-	hideToolRows?: boolean;
+	toolRowsMode?: ToolRowsMode;
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -980,8 +983,9 @@ export class SettingsManager {
 		return this.settings.hideThinkingBlock ?? false;
 	}
 
-	getHideToolRows(): boolean {
-		return this.settings.hideToolRows ?? false;
+	getToolRowsMode(): ToolRowsMode {
+		const mode = this.settings.toolRowsMode;
+		return mode && TOOL_ROWS_MODES.includes(mode) ? mode : "full";
 	}
 
 	getShowCacheMissNotices(): boolean {
@@ -1006,9 +1010,9 @@ export class SettingsManager {
 		this.save();
 	}
 
-	setHideToolRows(hide: boolean): void {
-		this.globalSettings.hideToolRows = hide;
-		this.markModified("hideToolRows");
+	setToolRowsMode(mode: ToolRowsMode): void {
+		this.globalSettings.toolRowsMode = mode;
+		this.markModified("toolRowsMode");
 		this.save();
 	}
 
