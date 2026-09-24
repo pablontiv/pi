@@ -77,6 +77,7 @@ export class ToolExecutionComponent extends Container {
 		{ sourceData: string; sourceMimeType: string; data: string; mimeType: string }
 	> = new Map();
 	private hideComponent = false;
+	private visible = true;
 
 	constructor(
 		toolName: string,
@@ -246,6 +247,12 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	setVisible(visible: boolean): void {
+		if (this.visible === visible) return;
+		this.visible = visible;
+		this.invalidate();
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -262,7 +269,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (this.hideComponent) {
+		if (!this.visible || this.hideComponent) {
 			return [];
 		}
 

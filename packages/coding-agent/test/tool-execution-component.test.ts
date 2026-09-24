@@ -145,6 +145,42 @@ describe("ToolExecutionComponent parity", () => {
 		expect(component.render(120)).toEqual([]);
 	});
 
+	test("hides an ordinary tool row without leaving its spacer or shell", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-hidden",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.setVisible(false);
+
+		expect(component.render(120)).toEqual([]);
+	});
+
+	test("restores a hidden tool row with its completed result", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-restored",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.setVisible(false);
+		component.updateResult({ content: [{ type: "text", text: "final result" }], isError: false });
+		expect(component.render(120)).toEqual([]);
+
+		component.setVisible(true);
+
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("final result");
+	});
+
 	test("uses built-in rendering for built-in overrides without custom renderers", () => {
 		const overrideDefinition: ToolDefinition = {
 			...createBaseToolDefinition("edit"),
