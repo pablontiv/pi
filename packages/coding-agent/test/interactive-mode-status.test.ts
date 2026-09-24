@@ -209,6 +209,7 @@ describe("InteractiveMode.createExtensionUIContext tool rows", () => {
 		const fakeThis = {
 			hideToolRows: false,
 			setToolRowsVisible: vi.fn(),
+			settingsManager: { setHideToolRows: vi.fn() },
 		};
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
@@ -217,6 +218,7 @@ describe("InteractiveMode.createExtensionUIContext tool rows", () => {
 		expect(uiContext.getToolRowsVisible()).toBe(true);
 		uiContext.setToolRowsVisible(false);
 		expect(fakeThis.setToolRowsVisible).toHaveBeenCalledWith(false);
+		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenCalledWith(true);
 	});
 });
 

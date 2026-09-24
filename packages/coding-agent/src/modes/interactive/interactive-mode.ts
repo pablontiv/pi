@@ -2589,7 +2589,10 @@ export class InteractiveMode {
 			getToolsExpanded: () => this.toolOutputExpanded,
 			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
 			getToolRowsVisible: () => !this.hideToolRows,
-			setToolRowsVisible: (visible) => this.setToolRowsVisible(visible),
+			setToolRowsVisible: (visible) => {
+				this.setToolRowsVisible(visible);
+				this.settingsManager.setHideToolRows(!visible);
+			},
 		};
 	}
 
