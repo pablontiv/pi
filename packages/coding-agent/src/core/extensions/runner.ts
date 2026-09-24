@@ -348,6 +348,8 @@ const noOpUIContext: ExtensionUIContext = {
 	setTheme: (_theme: string | Theme) => ({ success: false, error: "UI not available" }),
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
+	getToolRowsVisible: () => true,
+	setToolRowsVisible: () => {},
 };
 
 export class ExtensionRunner {

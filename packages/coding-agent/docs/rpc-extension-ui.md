@@ -15,9 +15,9 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 
 - `custom()` returns `undefined`.
 - `onTerminalInput()` returns a no-op unsubscribe function.
-- `setWorkingMessage()`, `setWorkingVisible()`, `setWorkingIndicator()`, `setHiddenThinkingLabel()`, `setFooter()`, `setHeader()`, `addAutocompleteProvider()`, `setEditorComponent()`, and `setToolsExpanded()` are no-ops.
+- `setWorkingMessage()`, `setWorkingVisible()`, `setWorkingIndicator()`, `setHiddenThinkingLabel()`, `setFooter()`, `setHeader()`, `addAutocompleteProvider()`, `setEditorComponent()`, `setToolsExpanded()`, and `setToolRowsVisible()` are no-ops.
 - `getEditorText()` returns `""` and `getEditorComponent()` returns `undefined`.
-- `getToolsExpanded()` returns `false`.
+- `getToolsExpanded()` returns `false`; `getToolRowsVisible()` returns `true`.
 - `pasteToEditor()` delegates to `setEditorText()` without terminal paste handling.
 - `getAllThemes()` returns `[]`, and `getTheme()` returns `undefined`.
 - `setTheme()` returns `{ success: false, error: "Theme switching not supported in RPC mode" }`.

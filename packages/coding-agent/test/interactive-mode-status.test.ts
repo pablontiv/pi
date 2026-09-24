@@ -204,6 +204,22 @@ describe("InteractiveMode tool-row visibility", () => {
 	});
 });
 
+describe("InteractiveMode.createExtensionUIContext tool rows", () => {
+	test("exposes tool-row visibility controls", () => {
+		const fakeThis = {
+			hideToolRows: false,
+			setToolRowsVisible: vi.fn(),
+		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+
+		expect(uiContext.getToolRowsVisible()).toBe(true);
+		uiContext.setToolRowsVisible(false);
+		expect(fakeThis.setToolRowsVisible).toHaveBeenCalledWith(false);
+	});
+});
+
 describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 	test("persists theme changes to settings manager", () => {
 		initTheme("dark");

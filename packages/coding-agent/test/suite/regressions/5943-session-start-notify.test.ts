@@ -41,6 +41,8 @@ function createUiContext(
 		setTheme: (_theme: string | Theme) => ({ success: false, error: "Theme switching not available in tests" }),
 		getToolsExpanded: () => false,
 		setToolsExpanded: () => {},
+		getToolRowsVisible: () => true,
+		setToolRowsVisible: () => {},
 	};
 }
 
@@ -88,6 +90,7 @@ type RebindContext = {
 
 type ReloadCommandContext = {
 	hideThinkingBlock: boolean;
+	hideToolRows: boolean;
 	session: {
 		isStreaming: boolean;
 		isCompacting: boolean;
@@ -99,6 +102,7 @@ type ReloadCommandContext = {
 	settingsManager: {
 		getHttpIdleTimeoutMs: () => number;
 		getHideThinkingBlock: () => boolean;
+		getHideToolRows: () => boolean;
 		getOutputPad: () => 0 | 1;
 		getEditorPaddingX: () => number;
 		getAutocompleteMaxVisible: () => number;
@@ -157,6 +161,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 	const editor = overrides.editor ?? {};
 	return {
 		hideThinkingBlock: overrides.hideThinkingBlock ?? false,
+		hideToolRows: overrides.hideToolRows ?? false,
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -171,6 +176,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		settingsManager: {
 			getHttpIdleTimeoutMs: () => 0,
 			getHideThinkingBlock: () => false,
+			getHideToolRows: () => false,
 			getOutputPad: () => 1,
 			getEditorPaddingX: () => 1,
 			getAutocompleteMaxVisible: () => 10,

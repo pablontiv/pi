@@ -291,6 +291,12 @@ export interface ExtensionUIContext {
 
 	/** Set tool output expansion state. */
 	setToolsExpanded(expanded: boolean): void;
+
+	/** Return whether interactive tool-call rows are visible. Non-TUI modes return true. */
+	getToolRowsVisible(): boolean;
+
+	/** Set interactive tool-call row visibility. Non-TUI modes ignore this call. */
+	setToolRowsVisible(visible: boolean): void;
 }
 
 // ============================================================================
