@@ -3401,6 +3401,7 @@ export class InteractiveMode {
 						this.outputPad,
 						this.getMarkdownTransformers(),
 					);
+					this.streamingComponent.setToolRowsVisible(!this.hideToolRows);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
@@ -3842,6 +3843,7 @@ export class InteractiveMode {
 					this.outputPad,
 					this.getMarkdownTransformers(),
 				);
+				assistantComponent.setToolRowsVisible(!this.hideToolRows);
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -4416,6 +4418,8 @@ export class InteractiveMode {
 		for (const child of this.chatContainer.children) {
 			if (child instanceof ToolExecutionComponent) {
 				child.setVisible(visible);
+			} else if (child instanceof AssistantMessageComponent) {
+				child.setToolRowsVisible(visible);
 			}
 		}
 		this.ui.requestRender();

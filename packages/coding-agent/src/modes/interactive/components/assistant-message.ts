@@ -20,6 +20,7 @@ export class AssistantMessageComponent extends Container {
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
+	private toolRowsVisible = true;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 
@@ -77,7 +78,24 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	setToolRowsVisible(visible: boolean): void {
+		this.toolRowsVisible = visible;
+	}
+
 	override render(width: number): string[] {
+		const suppressOrphanedThinking =
+			!this.toolRowsVisible &&
+			this.hideThinkingBlock &&
+			this.hasToolCalls &&
+			this.lastMessage?.stopReason !== "length" &&
+			this.lastMessage?.stopReason !== "aborted" &&
+			this.lastMessage?.stopReason !== "error" &&
+			!this.lastMessage?.content.some((content) => content.type === "text" && content.text.trim()) &&
+			![...this.thinkingVisibilityOverrides.values()].some((visible) => visible === false);
+		if (suppressOrphanedThinking) {
+			return [];
+		}
+
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;

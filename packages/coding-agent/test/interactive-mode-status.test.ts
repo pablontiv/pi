@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
@@ -7,6 +8,7 @@ import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -169,6 +171,83 @@ describe("InteractiveMode.setToolsExpanded", () => {
 });
 
 describe("InteractiveMode tool-row visibility", () => {
+	test("suppresses orphaned thinking labels while tool rows are hidden", () => {
+		initTheme("dark");
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "I should inspect the file." },
+				{ type: "toolCall", id: "tool-call", name: "read", arguments: { path: "file.txt" } },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-4o-mini",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const component = new AssistantMessageComponent(message, true);
+		const activeThinkingComponent = new AssistantMessageComponent(
+			{
+				...message,
+				content: [{ type: "thinking", thinking: "I am still deciding what to inspect." }],
+				stopReason: "stop",
+			},
+			true,
+		);
+		const textComponent = new AssistantMessageComponent(
+			{
+				...message,
+				content: [
+					{ type: "thinking", thinking: "I should explain the next step." },
+					{ type: "text", text: "I will inspect the file." },
+					{ type: "toolCall", id: "tool-call-with-text", name: "read", arguments: { path: "file.txt" } },
+				],
+			},
+			true,
+		);
+		const failedComponent = new AssistantMessageComponent(
+			{
+				...message,
+				stopReason: "error",
+				errorMessage: "Tool execution failed",
+			},
+			true,
+		);
+		const chatContainer = new Container();
+		chatContainer.addChild(component);
+		chatContainer.addChild(activeThinkingComponent);
+		chatContainer.addChild(textComponent);
+		chatContainer.addChild(failedComponent);
+		const fakeThis = {
+			hideToolRows: false,
+			chatContainer,
+			ui: { requestRender: vi.fn() },
+		};
+		const setToolRowsVisible = (
+			InteractiveMode as unknown as {
+				prototype: { setToolRowsVisible(this: typeof fakeThis, visible: boolean): void };
+			}
+		).prototype.setToolRowsVisible;
+
+		expect(renderAll(chatContainer)).toContain("Thinking...");
+		setToolRowsVisible.call(fakeThis, false);
+		expect(component.render(120)).toEqual([]);
+		expect(activeThinkingComponent.render(120).join("\n")).toContain("Thinking...");
+		expect(textComponent.render(120).join("\n")).toContain("I will inspect the file.");
+		expect(failedComponent.render(120)).not.toEqual([]);
+
+		setToolRowsVisible.call(fakeThis, true);
+		expect(renderAll(chatContainer)).toContain("Thinking...");
+	});
+
 	test("hides and restores rows while persisting the preference", () => {
 		initTheme("dark");
 		const component = new ToolExecutionComponent(
