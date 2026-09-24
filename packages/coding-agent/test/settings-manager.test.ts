@@ -516,6 +516,20 @@ describe("SettingsManager", () => {
 		expect(reloadedManager.getFullscreenCopyOnSelect()).toBe(true);
 	});
 
+	describe("hideToolRows", () => {
+		it("defaults to visible rows and persists hiding", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getHideToolRows()).toBe(false);
+
+			manager.setHideToolRows(true);
+			await manager.flush();
+
+			expect(manager.getHideToolRows()).toBe(true);
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).hideToolRows).toBe(true);
+		});
+	});
+
 	describe("outputPad", () => {
 		it("should default to 1 and persist binary values", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

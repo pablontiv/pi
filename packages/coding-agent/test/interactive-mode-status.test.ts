@@ -8,6 +8,7 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -164,6 +165,42 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(loadedResourcesChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool output: expanded");
+	});
+});
+
+describe("InteractiveMode tool-row visibility", () => {
+	test("hides and restores rows while persisting the preference", () => {
+		initTheme("dark");
+		const component = new ToolExecutionComponent(
+			"tool",
+			"tool-row-visibility",
+			{},
+			{},
+			undefined,
+			{ requestRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const chatContainer = new Container();
+		chatContainer.addChild(component);
+		const fakeThis = {
+			hideToolRows: false,
+			chatContainer,
+			settingsManager: { setHideToolRows: vi.fn() },
+			ui: { requestRender: vi.fn() },
+			showStatus: vi.fn(),
+		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		(InteractiveMode as any).prototype.toggleToolRowsVisibility.call(fakeThis);
+
+		expect(component.render(120)).toEqual([]);
+		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenCalledWith(true);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool rows: hidden");
+
+		(InteractiveMode as any).prototype.toggleToolRowsVisibility.call(fakeThis);
+
+		expect(component.render(120)).not.toEqual([]);
+		expect(fakeThis.settingsManager.setHideToolRows).toHaveBeenLastCalledWith(false);
 	});
 });
 
