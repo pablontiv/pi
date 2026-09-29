@@ -181,6 +181,36 @@ describe("ToolExecutionComponent parity", () => {
 		expect(stripAnsi(component.render(120).join("\n"))).toContain("final result");
 	});
 
+	test.each(["compact", "hidden"] as const)(
+		"temporarily renders full output when %s rows are expanded, then restores the mode",
+		(mode) => {
+			const component = new ToolExecutionComponent(
+				"custom_tool",
+				`tool-${mode}-expansion`,
+				{ path: "file.txt" },
+				{},
+				undefined,
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.updateResult({ content: [{ type: "text", text: "secret output" }], isError: false });
+			component.setToolRowsMode(mode);
+
+			const collapsed = stripAnsi(component.render(120).join("\n"));
+			if (mode === "compact") {
+				expect(collapsed.trim()).toBe('custom_tool {"path":"file.txt"} [ok]');
+			} else {
+				expect(collapsed).toBe("");
+			}
+
+			component.setExpanded(true);
+			expect(stripAnsi(component.render(120).join("\n"))).toContain("secret output");
+
+			component.setExpanded(false);
+			expect(stripAnsi(component.render(120).join("\n"))).toBe(collapsed);
+		},
+	);
+
 	test("renders one call-header line with running status in compact mode", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
@@ -205,6 +235,51 @@ describe("ToolExecutionComponent parity", () => {
 		expect(stripAnsi(lines[0] ?? "").trim()).toBe("custom call [running]");
 	});
 
+	test("renders compact calls with the full tool-row foreground and background", () => {
+		const header = theme.fg("toolTitle", theme.bold("custom call"));
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text(header, 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-styled",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		const rendered = component.render(24).join("\n");
+		expect(rendered).toBe(theme.bg("toolPendingBg", ` ${header} ${theme.fg("muted", "[running]")}  `));
+	});
+
+	test("reapplies the tool background after truncating a styled compact header", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text(theme.fg("toolTitle", theme.bold("custom call with a long header")), 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact-truncated-background",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setToolRowsMode("compact");
+
+		const rendered = component.render(30).join("\n");
+		const backgroundAnsi = theme.getBgAnsi("toolPendingBg");
+		const beforeBackgroundReset = rendered.slice(0, rendered.lastIndexOf("\x1b[49m"));
+		const afterFullResets = beforeBackgroundReset.split("\x1b[0m").slice(1);
+		expect(afterFullResets.length).toBeGreaterThan(0);
+		expect(afterFullResets.every((suffix) => suffix.startsWith(backgroundAnsi))).toBe(true);
+	});
+
 	test("does not serialize arguments when a compact call header is available", () => {
 		const args: Record<string, unknown> = {};
 		args.self = args;
@@ -227,9 +302,9 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test.each([
-		{ isError: false, status: "[ok]" },
-		{ isError: true, status: "[error]" },
-	])("shows $status and hides completed output in compact mode", ({ isError, status }) => {
+		{ isError: false, status: "[ok]", background: "toolSuccessBg" },
+		{ isError: true, status: "[error]", background: "toolErrorBg" },
+	] as const)("shows $status and hides completed output in compact mode", ({ isError, status, background }) => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 			renderCall: () => new Text("custom call", 0, 0),
@@ -251,6 +326,8 @@ describe("ToolExecutionComponent parity", () => {
 		const lines = component.render(120);
 		expect(lines).toHaveLength(1);
 		expect(stripAnsi(lines[0] ?? "").trim()).toBe(`custom call ${status}`);
+		const backgroundPrefix = theme.bg(background, "").replace("\x1b[49m", "");
+		expect(lines[0]?.startsWith(backgroundPrefix)).toBe(true);
 		expect(stripAnsi(lines.join("\n"))).not.toContain("secret result");
 	});
 

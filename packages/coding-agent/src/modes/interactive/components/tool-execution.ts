@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
 import type { ToolRowsMode } from "../../../core/settings-manager.ts";
-import type { Theme } from "../theme/theme.ts";
+import type { Theme, ThemeBg } from "../theme/theme.ts";
 
 /**
  * What this component needs from a tool: how to draw it. It neither executes tools nor reads their
@@ -273,23 +273,31 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (this.toolRowsMode === "hidden" || this.hideComponent) {
+		const effectiveToolRowsMode = this.expanded ? "full" : this.toolRowsMode;
+		if (effectiveToolRowsMode === "hidden" || this.hideComponent) {
 			return [];
 		}
-		if (this.toolRowsMode === "compact") {
+		if (effectiveToolRowsMode === "compact") {
 			let status = theme.fg("muted", "[running]");
 			if (this.result && !this.isPartial) {
 				status = this.result.isError ? theme.fg("error", "[error]") : theme.fg("success", "[ok]");
 			}
-			const availableWidth = Math.max(0, width - visibleWidth(status) - 1);
+			const availableWidth = Math.max(0, width - visibleWidth(status) - 2);
 			const renderedCall = this.callRendererComponent?.render(width) ?? [];
 			let callLine = renderedCall.find((line) => stripAnsi(line).trim().length > 0);
 			if (!callLine) {
 				const serializedArgs = JSON.stringify(this.args);
-				callLine = `${this.toolName}${serializedArgs ? ` ${serializedArgs}` : ""}`;
+				callLine = `${theme.fg("toolTitle", theme.bold(this.toolName))}${serializedArgs ? ` ${serializedArgs}` : ""}`;
 			}
-			const header = theme.fg("toolTitle", truncateToWidth(stripAnsi(callLine).trim(), availableWidth, "..."));
-			return [visibleWidth(header) > 0 ? `${header} ${status}` : status];
+			const backgroundToken = this.getBackgroundToken();
+			const backgroundAnsi = theme.getBgAnsi(backgroundToken);
+			const header = truncateToWidth(callLine.trim(), availableWidth, "...").replaceAll(
+				"\x1b[0m",
+				`\x1b[0m${backgroundAnsi}`,
+			);
+			const line = visibleWidth(header) > 0 ? ` ${header} ${status}` : status;
+			const paddedLine = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+			return [theme.bg(backgroundToken, paddedLine)];
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -330,12 +338,13 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	private getBackgroundToken(): ThemeBg {
+		if (this.isPartial) return "toolPendingBg";
+		return this.result?.isError ? "toolErrorBg" : "toolSuccessBg";
+	}
+
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+		const bgFn = (text: string) => theme.bg(this.getBackgroundToken(), text);
 
 		let hasContent = false;
 		this.hideComponent = false;
