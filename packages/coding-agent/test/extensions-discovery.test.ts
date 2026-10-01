@@ -431,6 +431,51 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].entryRenderers?.has("my-entry-type")).toBe(true);
 	});
 
+	it("stores transcript presentation policies in extension and registration order", async () => {
+		const firstPath = path.join(tempDir, "first.ts");
+		const secondPath = path.join(tempDir, "second.ts");
+		fs.writeFileSync(
+			firstPath,
+			`
+				export default function(pi) {
+					pi.registerTranscriptPresentationPolicy(function firstFull() {
+						return { density: "full" };
+					});
+					pi.registerTranscriptPresentationPolicy(function firstSummary() {
+						return { density: "summary" };
+					});
+				}
+			`,
+		);
+		fs.writeFileSync(
+			secondPath,
+			`
+				export default function(pi) {
+					pi.registerTranscriptPresentationPolicy(function secondHidden() {
+						return { density: "hidden" };
+					});
+				}
+			`,
+		);
+
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		const result = await loadExtensions([secondPath, firstPath], tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(
+			result.extensions.flatMap((extension) =>
+				(extension.transcriptPresentationPolicies ?? []).map((registration) => ({
+					name: registration.policy.name,
+					sourcePath: registration.sourceInfo.path,
+				})),
+			),
+		).toEqual([
+			{ name: "secondHidden", sourcePath: secondPath },
+			{ name: "firstFull", sourcePath: firstPath },
+			{ name: "firstSummary", sourcePath: firstPath },
+		]);
+	});
+
 	it("reports error when extension throws during initialization", async () => {
 		const extCode = `
 			export default function(pi) {
