@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type {
@@ -36,12 +36,16 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 type InteractiveInternals = {
 	isInitialized: boolean;
 	chatContainer: Container;
+	pendingMessagesContainer: Container;
 	pendingTools: Map<string, ToolExecutionComponent>;
 	toolComponents: Set<ToolExecutionComponent>;
 	subscribeToAgent(): void;
 	bindTranscriptPresentationInvalidation(): void;
 	rebuildChatFromMessages(): void;
 	setToolsExpanded(expanded: boolean): void;
+	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
+	flushPendingBashComponents(): void;
+	handleReloadCommand(): Promise<void>;
 };
 
 function createInteractive(harness: Harness): InteractiveInternals {
@@ -194,6 +198,204 @@ describe("interactive transcript presentation integration", () => {
 		expect(normalized(mode.chatContainer)).toContain("EXPECTED_TOOL_FAILURE");
 	});
 
+	it("applies the bash policy identically to every live creation path and reconstructed history", async () => {
+		let density: TranscriptDensity = "hidden";
+		let invalidatePolicy = () => {};
+		const harness = await createHarnessWithExtensions({
+			responses: [{ text: "streaming", delayMs: 50 }],
+			extensionFactories: [
+				{
+					path: "<bash-presentation-policy>",
+					factory: (pi) => {
+						const registration = pi.registerTranscriptPresentationPolicy((block) =>
+							block.kind === "bash" ? { density } : undefined,
+						);
+						invalidatePolicy = () => registration.invalidate();
+						pi.on("user_bash", async (event) =>
+							event.command === "intercepted"
+								? {
+										result: {
+											output: "INTERCEPTED_BASH_OUTPUT",
+											exitCode: 0,
+											cancelled: false,
+											truncated: false,
+										},
+									}
+								: undefined,
+						);
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const executeBash = vi.spyOn(harness.session, "executeBash").mockImplementation(async (_command, onOutput) => {
+			const result = {
+				output: "LOCAL_BASH_OUTPUT",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+			};
+			onOutput?.("LOCAL_BASH_OUTPUT");
+			harness.session.recordBashResult("local", result);
+			return result;
+		});
+		const mode = createInteractive(harness);
+		mode.subscribeToAgent();
+
+		await mode.handleBashCommand("intercepted");
+		await mode.handleBashCommand("local");
+		expect(executeBash).toHaveBeenCalledOnce();
+		expect(normalized(mode.chatContainer)).not.toContain("INTERCEPTED_BASH_OUTPUT");
+		expect(normalized(mode.chatContainer)).not.toContain("LOCAL_BASH_OUTPUT");
+
+		const prompt = harness.session.prompt("keep the session streaming");
+		await waitUntil(() => harness.session.isStreaming);
+		await mode.handleBashCommand("intercepted");
+		expect(normalized(mode.pendingMessagesContainer)).not.toContain("INTERCEPTED_BASH_OUTPUT");
+		mode.flushPendingBashComponents();
+		expect(normalized(mode.chatContainer)).not.toContain("INTERCEPTED_BASH_OUTPUT");
+		await prompt;
+
+		density = "full";
+		invalidatePolicy();
+		const live = normalized(mode.chatContainer);
+		expect(live).toContain("INTERCEPTED_BASH_OUTPUT");
+		expect(live).toContain("LOCAL_BASH_OUTPUT");
+		mode.rebuildChatFromMessages();
+		const historical = normalized(mode.chatContainer);
+		expect(historical).toContain("INTERCEPTED_BASH_OUTPUT");
+		expect(historical).toContain("LOCAL_BASH_OUTPUT");
+	});
+
+	it("uses mounted related tool state when deciding orphaned thinking placeholder visibility", async () => {
+		const resolvedToolStates: Array<TranscriptBlockDescriptor["state"]> = [];
+		const harness = await createHarnessWithExtensions({
+			settings: { hideThinkingBlock: true },
+			responses: [
+				{
+					thinking: "private reasoning",
+					toolCalls: [{ id: "stateful-tool", name: "echo", args: {} }],
+				},
+				"done",
+			],
+			baseToolsOverride: {
+				echo: {
+					name: "echo",
+					label: "Echo",
+					description: "Echo",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "STATEFUL_RESULT" }], details: {} }),
+				},
+			},
+			extensionFactories: [
+				{
+					path: "<stateful-presentation-policy>",
+					factory: (pi) => {
+						pi.registerTranscriptPresentationPolicy((block) => {
+							if (block.kind !== "tool") return undefined;
+							resolvedToolStates.push(block.state);
+							return { density: block.state === "success" ? "hidden" : "summary" };
+						});
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const mode = createInteractive(harness);
+		mode.subscribeToAgent();
+		await harness.session.prompt("echo");
+
+		const rendered = normalized(mode.chatContainer);
+		expect(rendered).not.toContain("STATEFUL_RESULT");
+		expect(rendered).not.toContain("Thinking...");
+		expect(resolvedToolStates).toContain("success");
+	});
+
+	it("binds presentation invalidation through real startup and reload lifecycle before replacement session_start", async () => {
+		let density: TranscriptDensity = "full";
+		let duringReloadSessionStart = false;
+		let oldResolutionCountAtReplacementStart = -1;
+		let getOldResolutionCount = () => 0;
+		const ordering: string[] = [];
+		const harness = await createHarnessWithExtensions({
+			settings: { quietStartup: true },
+			extensionFactories: [
+				{
+					path: "<lifecycle-presentation-policy>",
+					factory: (pi) => {
+						const registration = pi.registerTranscriptPresentationPolicy((block) =>
+							block.kind === "bash" ? { density } : undefined,
+						);
+						pi.on("session_start", (event) => {
+							if (event.reason !== "reload") return;
+							oldResolutionCountAtReplacementStart = getOldResolutionCount();
+							ordering.push("replacement-session-start");
+							density = "hidden";
+							duringReloadSessionStart = true;
+							registration.invalidate();
+							duringReloadSessionStart = false;
+						});
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.recordBashResult("printf lifecycle", {
+			output: "LIFECYCLE_BASH_OUTPUT",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+		});
+		const oldRunner = harness.session.extensionRunner;
+		const originalSubscribe = oldRunner.onTranscriptPresentationInvalidated.bind(oldRunner);
+		vi.spyOn(oldRunner, "onTranscriptPresentationInvalidated").mockImplementation((listener) => {
+			const unsubscribe = originalSubscribe(listener);
+			return () => {
+				ordering.push("old-runner-detached");
+				unsubscribe();
+			};
+		});
+		const oldResolve = vi.spyOn(oldRunner, "resolveTranscriptPresentation");
+		getOldResolutionCount = () => oldResolve.mock.calls.length;
+		const mode = new InteractiveMode(
+			{
+				session: harness.session,
+				setBeforeSessionInvalidate: () => {},
+				setRebindSession: () => {},
+			} as unknown as AgentSessionRuntime,
+			{ terminal: new VirtualTerminal(100, 30) },
+		) as unknown as InteractiveInternals;
+		const originalInvalidate = mode.chatContainer.invalidate.bind(mode.chatContainer);
+		vi.spyOn(mode.chatContainer, "invalidate").mockImplementation(() => {
+			if (duringReloadSessionStart) ordering.push("replacement-invalidation");
+			originalInvalidate();
+		});
+
+		try {
+			await (mode as unknown as { init(): Promise<void> }).init();
+			expect(oldRunner.onTranscriptPresentationInvalidated).toHaveBeenCalledOnce();
+			expect(normalized(mode.chatContainer)).toContain("LIFECYCLE_BASH_OUTPUT");
+
+			await mode.handleReloadCommand();
+
+			expect(harness.session.extensionRunner).not.toBe(oldRunner);
+			expect(ordering).toEqual(
+				expect.arrayContaining(["old-runner-detached", "replacement-session-start", "replacement-invalidation"]),
+			);
+			expect(ordering.indexOf("old-runner-detached")).toBeLessThan(ordering.indexOf("replacement-session-start"));
+			expect(ordering.indexOf("replacement-session-start")).toBeLessThan(
+				ordering.indexOf("replacement-invalidation"),
+			);
+			expect(normalized(mode.chatContainer)).not.toContain("LIFECYCLE_BASH_OUTPUT");
+			expect(oldResolutionCountAtReplacementStart).toBeGreaterThanOrEqual(0);
+			expect(oldResolve).toHaveBeenCalledTimes(oldResolutionCountAtReplacementStart);
+		} finally {
+			(mode as unknown as { stop(fullscreenExitOutput?: "transcript" | "resume-hint" | "none"): void }).stop("none");
+		}
+	});
+
 	it("forces hidden and summarized tools to full while expanded and reapplies policy when collapsed", async () => {
 		let density: TranscriptDensity = "hidden";
 		const harness = await createHarnessWithExtensions({
@@ -269,7 +471,22 @@ describe("assistant thinking presentation relationships", () => {
 				descriptors.push({ ...block, capabilities: { ...block.capabilities } });
 				return { density: block.kind === "tool" ? density : "full" };
 			};
-			const component = new AssistantMessageComponent(message, true, undefined, "Thinking...", 1, [], resolve);
+			const component = new AssistantMessageComponent(
+				message,
+				true,
+				undefined,
+				"Thinking...",
+				1,
+				[],
+				resolve,
+				(toolCall) => ({
+					id: toolCall.id,
+					kind: "tool",
+					toolName: toolCall.name,
+					state: "pending",
+					capabilities: { summary: true, expandable: true },
+				}),
+			);
 
 			expect(component.render(100).join("\n")).toContain("Thinking...");
 			expect(descriptors).toContainEqual({
@@ -286,10 +503,35 @@ describe("assistant thinking presentation relationships", () => {
 			descriptors.push({ ...block, capabilities: { ...block.capabilities } });
 			return { density: block.kind === "tool" ? "hidden" : "full" };
 		};
-		const hidden = new AssistantMessageComponent(message, true, undefined, "Thinking...", 1, [], resolve);
+		const getRelatedToolDescriptor = (toolCall: Readonly<{ id: string; name: string }>) => ({
+			id: toolCall.id,
+			kind: "tool" as const,
+			toolName: toolCall.name,
+			state: "pending" as const,
+			capabilities: { summary: true, expandable: true },
+		});
+		const hidden = new AssistantMessageComponent(
+			message,
+			true,
+			undefined,
+			"Thinking...",
+			1,
+			[],
+			resolve,
+			getRelatedToolDescriptor,
+		);
 		expect(hidden.render(100)).toEqual([]);
 
-		const ordinary = new AssistantMessageComponent(message, false, undefined, "Thinking...", 1, [], resolve);
+		const ordinary = new AssistantMessageComponent(
+			message,
+			false,
+			undefined,
+			"Thinking...",
+			1,
+			[],
+			resolve,
+			getRelatedToolDescriptor,
+		);
 		expect(ordinary.render(100).join("\n")).toContain("private reasoning");
 		expect(descriptors.some((block) => block.kind === "thinking" && block.subtype === undefined)).toBe(true);
 	});

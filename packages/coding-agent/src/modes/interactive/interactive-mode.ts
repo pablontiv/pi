@@ -2203,6 +2203,7 @@ export class InteractiveMode {
 			assistant?: AssistantMessageComponent;
 			outputPadding?: OutputPaddingComponent;
 			expandable?: Expandable;
+			container?: Container;
 		} = {},
 	): TranscriptPresentationComponent {
 		const presented = new TranscriptPresentationComponent({
@@ -2212,7 +2213,7 @@ export class InteractiveMode {
 			renderSummary: options.renderSummary,
 			isExpanded: options.isExpanded ?? (options.expandable ? () => this.toolOutputExpanded : undefined),
 		});
-		this.chatContainer.addChild(presented);
+		(options.container ?? this.chatContainer).addChild(presented);
 		this.presentedComponents.set(component, presented);
 		if (options.tool) this.toolComponents.add(options.tool);
 		if (options.assistant) this.assistantMessageComponents.add(options.assistant);
@@ -2222,12 +2223,39 @@ export class InteractiveMode {
 	}
 
 	private addToolExecutionComponent(component: ToolExecutionComponent): TranscriptPresentationComponent {
-		return this.addPresentedComponent(component, () => component.getTranscriptDescriptor(), {
+		const presented = this.addPresentedComponent(component, () => component.getTranscriptDescriptor(), {
 			renderSummary: (width) => component.renderSummary(width),
 			isExpanded: () => component.isExpanded(),
 			tool: component,
 			expandable: component,
 		});
+		this.invalidateAssistantPresentationRelationships();
+		return presented;
+	}
+
+	private addBashExecutionComponent(
+		component: BashExecutionComponent,
+		container: Container = this.chatContainer,
+	): TranscriptPresentationComponent {
+		return this.addPresentedComponent(
+			component,
+			() => ({ kind: "bash", capabilities: { summary: false, expandable: true } }),
+			{ expandable: component, container },
+		);
+	}
+
+	private getRelatedToolTranscriptDescriptor(
+		toolCall: Readonly<{ id: string; name: string }>,
+	): TranscriptBlockDescriptor | undefined {
+		for (const component of this.toolComponents) {
+			const descriptor = component.getTranscriptDescriptor();
+			if (descriptor.id === toolCall.id) return descriptor;
+		}
+		return undefined;
+	}
+
+	private invalidateAssistantPresentationRelationships(): void {
+		for (const component of this.assistantMessageComponents) component.invalidate();
 	}
 
 	private removePresentedComponent(component: Component): void {
@@ -3529,6 +3557,7 @@ export class InteractiveMode {
 						this.outputPad,
 						this.getMarkdownTransformers(),
 						(block) => this.resolveTranscriptPresentation(block),
+						(toolCall) => this.getRelatedToolTranscriptDescriptor(toolCall),
 					);
 					this.streamingMessage = event.message;
 					this.addPresentedComponent(
@@ -3607,6 +3636,7 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
+						this.invalidateAssistantPresentationRelationships();
 						this.pendingTools.clear();
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
@@ -3667,6 +3697,7 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
+					this.invalidateAssistantPresentationRelationships();
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3905,11 +3936,7 @@ export class InteractiveMode {
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
 				);
-				this.addPresentedComponent(
-					component,
-					() => ({ kind: "bash", capabilities: { summary: false, expandable: true } }),
-					{ expandable: component },
-				);
+				this.addBashExecutionComponent(component);
 				break;
 			}
 			case "custom": {
@@ -4022,6 +4049,7 @@ export class InteractiveMode {
 					this.outputPad,
 					this.getMarkdownTransformers(),
 					(block) => this.resolveTranscriptPresentation(block),
+					(toolCall) => this.getRelatedToolTranscriptDescriptor(toolCall),
 				);
 				this.addPresentedComponent(
 					assistantComponent,
@@ -4108,6 +4136,7 @@ export class InteractiveMode {
 								errorMessage = message.errorMessage || "Error";
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+							this.invalidateAssistantPresentationRelationships();
 						} else {
 							renderedPendingTools.set(content.id, component);
 						}
@@ -4122,6 +4151,7 @@ export class InteractiveMode {
 				const component = renderedPendingTools.get(message.toolCallId);
 				if (component) {
 					component.updateResult(message);
+					this.invalidateAssistantPresentationRelationships();
 					renderedPendingTools.delete(message.toolCallId);
 				}
 			} else {
@@ -4912,8 +4942,10 @@ export class InteractiveMode {
 	/** Move pending bash components from pending area to chat */
 	private flushPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
-			this.pendingMessagesContainer.removeChild(component);
-			this.chatContainer.addChild(component);
+			const presented = this.presentedComponents.get(component);
+			if (!presented) continue;
+			this.pendingMessagesContainer.removeChild(presented);
+			this.chatContainer.addChild(presented);
 		}
 		this.pendingBashComponents = [];
 	}
@@ -7069,10 +7101,10 @@ export class InteractiveMode {
 			// Create UI component for display
 			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
 			if (this.session.isStreaming) {
-				this.pendingMessagesContainer.addChild(this.bashComponent);
+				this.addBashExecutionComponent(this.bashComponent, this.pendingMessagesContainer);
 				this.pendingBashComponents.push(this.bashComponent);
 			} else {
-				this.chatContainer.addChild(this.bashComponent);
+				this.addBashExecutionComponent(this.bashComponent);
 			}
 
 			// Show output and complete
@@ -7099,11 +7131,11 @@ export class InteractiveMode {
 
 		if (isDeferred) {
 			// Show in pending area when agent is streaming
-			this.pendingMessagesContainer.addChild(this.bashComponent);
+			this.addBashExecutionComponent(this.bashComponent, this.pendingMessagesContainer);
 			this.pendingBashComponents.push(this.bashComponent);
 		} else {
 			// Show in chat immediately when agent is idle
-			this.chatContainer.addChild(this.bashComponent);
+			this.addBashExecutionComponent(this.bashComponent);
 		}
 		this.ui.requestRender();
 
