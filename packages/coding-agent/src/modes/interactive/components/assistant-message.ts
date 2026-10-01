@@ -1,5 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import type {
+	TranscriptBlockDescriptor,
+	TranscriptPresentation,
+} from "../../../core/extensions/transcript-presentation.ts";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -18,6 +22,7 @@ export class AssistantMessageComponent extends Container {
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private resolveTranscriptPresentation: (block: Readonly<TranscriptBlockDescriptor>) => TranscriptPresentation;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
@@ -30,6 +35,9 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		resolveTranscriptPresentation: (block: Readonly<TranscriptBlockDescriptor>) => TranscriptPresentation = () => ({
+			density: "full",
+		}),
 	) {
 		super();
 
@@ -38,6 +46,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.resolveTranscriptPresentation = resolveTranscriptPresentation;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -95,14 +104,6 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
-
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
-
 		// Render content in order
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
@@ -141,6 +142,30 @@ export class AssistantMessageComponent extends Container {
 
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
+				const relatedTools = message.content.filter((block) => block.type === "toolCall");
+				const thinkingDescriptor: TranscriptBlockDescriptor = {
+					kind: "thinking",
+					...(hidden && relatedTools.length > 0 ? { subtype: "orphaned-thinking-placeholder" as const } : {}),
+					capabilities: { summary: false, expandable: false },
+				};
+				const thinkingPresentation = this.resolveTranscriptPresentation(thinkingDescriptor);
+				const allRelatedToolsHidden =
+					hidden &&
+					relatedTools.length > 0 &&
+					relatedTools.every(
+						(toolCall) =>
+							this.resolveTranscriptPresentation({
+								id: toolCall.id,
+								kind: "tool",
+								toolName: toolCall.name,
+								state: "pending",
+								capabilities: { summary: true, expandable: true },
+							}).density === "hidden",
+					);
+				if (thinkingPresentation.density === "hidden" || (hidden && allRelatedToolsHidden)) {
+					continue;
+				}
+
 				const thinkingComponent = hidden
 					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
 					: new Markdown(
@@ -172,6 +197,10 @@ export class AssistantMessageComponent extends Container {
 					this.contentContainer.addChild(new Spacer(1));
 				}
 			}
+		}
+
+		if (this.contentContainer.children.length > 0) {
+			this.contentContainer.children.unshift(new Spacer(1));
 		}
 
 		// Check if incomplete/failed - show after partial content.
