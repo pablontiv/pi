@@ -18,6 +18,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
+import type { SettingsScope } from "../settings-manager.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
@@ -320,7 +321,7 @@ function createExtensionAPI(
 					assertActive();
 					return runtime.getExtensionSetting(extension.path, key) as Static<TSchemaType>;
 				},
-				set(value: Static<TSchemaType>, options?: { scope?: "global" | "project" }): void {
+				set(value: Static<TSchemaType>, options?: { scope?: SettingsScope }): void {
 					assertActive();
 					runtime.setExtensionSetting(extension.path, key, value, options?.scope ?? "global");
 				},

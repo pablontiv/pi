@@ -667,23 +667,35 @@ describe("extension setting registration", () => {
 		},
 	);
 
-	it("matches UI defaults to choices using structural equality", async () => {
+	it("matches UI defaults structurally and detaches nested registered values", async () => {
 		const schema = Type.Object({ mode: Type.String(), nested: Type.Object({ enabled: Type.Boolean() }) });
+		const defaultValue = { mode: "full", nested: { enabled: true } };
+		const choiceValue = { nested: { enabled: true }, mode: "full" };
 		const extension = await loadSettingExtension((pi) => {
 			pi.registerSetting({
 				key: "acme.structured-mode",
 				schema,
-				defaultValue: { mode: "full", nested: { enabled: true } },
+				defaultValue,
 				title: "Structured mode",
 				description: "A structured setting",
 				ui: {
 					control: "select",
-					choices: [{ label: "Full", value: { nested: { enabled: true }, mode: "full" } }],
+					choices: [{ label: "Full", value: choiceValue }],
 				},
 			});
 		});
 
-		expect(extension.settings?.has("acme.structured-mode")).toBe(true);
+		defaultValue.nested.enabled = false;
+		choiceValue.nested.enabled = false;
+		const definition = extension.settings?.get("acme.structured-mode")?.definition;
+		expect(definition?.defaultValue).toEqual({ mode: "full", nested: { enabled: true } });
+		expect(definition?.ui?.choices[0]?.value).toEqual({ mode: "full", nested: { enabled: true } });
+		expect(definition?.defaultValue).not.toBe(defaultValue);
+		expect(definition?.ui?.choices[0]?.value).not.toBe(choiceValue);
+		expect(Object.isFrozen(definition?.defaultValue)).toBe(true);
+		expect(Object.isFrozen((definition?.defaultValue as typeof defaultValue).nested)).toBe(true);
+		expect(Object.isFrozen(definition?.ui?.choices[0]?.value)).toBe(true);
+		expect(Object.isFrozen((definition?.ui?.choices[0]?.value as typeof choiceValue).nested)).toBe(true);
 	});
 
 	it.each([
@@ -738,6 +750,43 @@ describe("extension setting registration", () => {
 				pi.registerSetting(createDefinition() as ExtensionSettingDefinition<typeof modeSchema>);
 			}),
 		).rejects.toThrow(expectedError);
+	});
+
+	it.each([
+		["undefined", undefined],
+		["null", null],
+		["a non-schema object", { notASchema: true }],
+		[
+			"a schema whose validator throws",
+			Type.Refine(Type.String(), () => {
+				throw new Error("broken refinement");
+			}),
+		],
+	])("rejects %s schemas with setting context and the original cause", async (_description, schema) => {
+		let thrown: unknown;
+		try {
+			await loadSettingExtension((pi) => {
+				pi.registerSetting({ ...modeDefinition(), schema: schema as unknown as typeof modeSchema });
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		const registrationError = thrown as Error;
+		expect(registrationError.message).toMatch(/acme\.tool-rows\.mode.*invalid.*schema/i);
+		expect(registrationError.cause).toBeDefined();
+	});
+
+	it("rejects null UI metadata with setting context", async () => {
+		await expect(
+			loadSettingExtension((pi) => {
+				pi.registerSetting({
+					...modeDefinition(),
+					ui: null,
+				} as unknown as ExtensionSettingDefinition<typeof modeSchema>);
+			}),
+		).rejects.toThrow(/acme\.tool-rows\.mode.*UI metadata/i);
 	});
 
 	it("rejects a duplicate key in one extension", async () => {

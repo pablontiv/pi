@@ -60,6 +60,34 @@ function copySettingValue<T>(key: string, kind: string, value: unknown): T {
 	}
 }
 
+function invalidSchemaError(key: string, cause: unknown): Error {
+	return new Error(`Extension setting "${key}" has an invalid TypeBox schema.`, { cause });
+}
+
+function cloneSettingSchema<TSchemaType extends TSchema>(key: string, schema: unknown): TSchemaType {
+	try {
+		if (
+			typeof schema !== "object" ||
+			schema === null ||
+			Array.isArray(schema) ||
+			(!Object.hasOwn(schema, "~kind") && !Object.hasOwn(schema, "~unsafe"))
+		) {
+			throw new TypeError("Expected a TypeBox schema object");
+		}
+		return Clone(schema) as TSchemaType;
+	} catch (cause) {
+		throw invalidSchemaError(key, cause);
+	}
+}
+
+function checkSettingValue(key: string, schema: TSchema, value: unknown): boolean {
+	try {
+		return Check(schema, value);
+	} catch (cause) {
+		throw invalidSchemaError(key, cause);
+	}
+}
+
 /** Validate, defensively clone, and freeze a setting definition for loader-owned registration. */
 export function cloneExtensionSettingDefinition<TSchemaType extends TSchema>(
 	definition: ExtensionSettingDefinition<TSchemaType>,
@@ -77,14 +105,20 @@ export function cloneExtensionSettingDefinition<TSchemaType extends TSchema>(
 		throw new Error(`Extension setting "${key}" must define string title and description fields.`);
 	}
 
+	const schema = deepFreeze(cloneSettingSchema<TSchemaType>(key, definition.schema));
 	const defaultValue = copySettingValue<Static<TSchemaType>>(key, "defaultValue", definition.defaultValue);
-	if (!Check(definition.schema, defaultValue)) {
+	if (!checkSettingValue(key, schema, defaultValue)) {
 		throw new Error(`Extension setting "${key}" defaultValue does not satisfy its schema.`);
 	}
 
 	let ui: ExtensionSettingDefinition<TSchemaType>["ui"];
 	if (definition.ui !== undefined) {
-		if (definition.ui.control !== "select" || !Array.isArray(definition.ui.choices)) {
+		if (
+			typeof definition.ui !== "object" ||
+			definition.ui === null ||
+			definition.ui.control !== "select" ||
+			!Array.isArray(definition.ui.choices)
+		) {
 			throw new Error(`Extension setting "${key}" UI metadata must define a select control with choices.`);
 		}
 		const labels = new Set<string>();
@@ -98,7 +132,7 @@ export function cloneExtensionSettingDefinition<TSchemaType extends TSchema>(
 			}
 			labels.add(choice.label);
 			const value = copySettingValue<Static<TSchemaType>>(key, `UI choice "${choice.label}"`, choice.value);
-			if (!Check(definition.schema, value)) {
+			if (!checkSettingValue(key, schema, value)) {
 				throw new Error(`Extension setting "${key}" UI choice "${choice.label}" does not satisfy its schema.`);
 			}
 			choices.push({ label: choice.label, value });
@@ -108,8 +142,6 @@ export function cloneExtensionSettingDefinition<TSchemaType extends TSchema>(
 		}
 		ui = { control: "select", choices };
 	}
-
-	const schema = Clone(definition.schema);
 
 	return deepFreeze({
 		key,
