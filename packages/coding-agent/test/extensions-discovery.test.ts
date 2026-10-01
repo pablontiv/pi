@@ -2,8 +2,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
+import { Check } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+} from "../src/core/extensions/loader.ts";
+import type { ExtensionAPI, ExtensionSettingDefinition } from "../src/core/extensions/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -563,5 +571,191 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(0);
+	});
+});
+
+describe("extension setting registration", () => {
+	const modeSchema = Type.Union([Type.Literal("full"), Type.Literal("compact"), Type.Literal("hidden")]);
+	const modeDefinition = (): ExtensionSettingDefinition<typeof modeSchema> => ({
+		key: "acme.tool-rows.mode",
+		schema: modeSchema,
+		defaultValue: "full",
+		title: "Tool rows",
+		description: "How tool calls appear",
+		ui: {
+			control: "select",
+			choices: [
+				{ label: "Full", value: "full" },
+				{ label: "Compact", value: "compact" },
+				{ label: "Hidden", value: "hidden" },
+			],
+		},
+	});
+
+	async function loadSettingExtension(
+		register: (pi: ExtensionAPI) => void | Promise<void>,
+	): Promise<Awaited<ReturnType<typeof loadExtensionFromFactory>>> {
+		return loadExtensionFromFactory(
+			register,
+			process.cwd(),
+			createEventBus(),
+			createExtensionRuntime(),
+			"<inline:settings>",
+		);
+	}
+
+	it("registers a cloned immutable literal-union definition with source ownership", async () => {
+		const definition = modeDefinition();
+		const extension = await loadSettingExtension((pi) => {
+			pi.registerSetting(definition);
+		});
+
+		const registration = extension.settings?.get(definition.key);
+		expect(extension.settings).toHaveLength(1);
+		expect(registration).toEqual({
+			definition,
+			sourceInfo: extension.sourceInfo,
+		});
+		expect(registration?.definition).not.toBe(definition);
+		expect(registration?.definition.schema).not.toBe(definition.schema);
+		expect(registration?.definition.ui?.choices).not.toBe(definition.ui?.choices);
+		expect(Object.isFrozen(registration)).toBe(true);
+		expect(Object.isFrozen(registration?.definition)).toBe(true);
+		expect(Object.isFrozen(registration?.definition.schema)).toBe(true);
+		expect(Object.isFrozen(registration?.definition.ui?.choices)).toBe(true);
+
+		definition.defaultValue = "compact";
+		const mutableChoice = definition.ui!.choices[0] as { label: string; value: "full" | "compact" | "hidden" };
+		mutableChoice.label = "Changed";
+		mutableChoice.value = "compact";
+		expect(registration?.definition.defaultValue).toBe("full");
+		expect(registration?.definition.ui?.choices[0]).toEqual({ label: "Full", value: "full" });
+	});
+
+	it("keeps setting storage lazy for extensions without registrations", async () => {
+		const extension = await loadSettingExtension(() => {});
+		expect(extension.settings).toBeUndefined();
+	});
+
+	it("preserves TypeBox schema metadata in the immutable clone", async () => {
+		const schema = Type.Refine(Type.String(), (value) => value.length > 0);
+		const extension = await loadSettingExtension((pi) => {
+			pi.registerSetting({
+				key: "acme.non-empty",
+				schema,
+				defaultValue: "value",
+				title: "Non-empty value",
+				description: "A refined setting",
+			});
+		});
+
+		const clonedSchema = extension.settings?.get("acme.non-empty")?.definition.schema;
+		expect(clonedSchema).toBeDefined();
+		expect(clonedSchema).not.toBe(schema);
+		expect(Check(clonedSchema!, "")).toBe(false);
+		expect(Object.isFrozen(Reflect.get(clonedSchema!, "~refine"))).toBe(true);
+	});
+
+	it.each(["mode", "Acme.mode", "acme..mode", "acme.constructor.mode", "acme.prototype.mode"])(
+		"rejects malformed or prototype-sensitive key %s",
+		async (key) => {
+			await expect(
+				loadSettingExtension((pi) => {
+					pi.registerSetting({ ...modeDefinition(), key });
+				}),
+			).rejects.toThrow(/invalid extension setting key/i);
+		},
+	);
+
+	it("matches UI defaults to choices using structural equality", async () => {
+		const schema = Type.Object({ mode: Type.String(), nested: Type.Object({ enabled: Type.Boolean() }) });
+		const extension = await loadSettingExtension((pi) => {
+			pi.registerSetting({
+				key: "acme.structured-mode",
+				schema,
+				defaultValue: { mode: "full", nested: { enabled: true } },
+				title: "Structured mode",
+				description: "A structured setting",
+				ui: {
+					control: "select",
+					choices: [{ label: "Full", value: { nested: { enabled: true }, mode: "full" } }],
+				},
+			});
+		});
+
+		expect(extension.settings?.has("acme.structured-mode")).toBe(true);
+	});
+
+	it.each([
+		["an owner namespace", () => ({ ...modeDefinition(), key: "mode" }), /key.*namespace|invalid.*key/i],
+		["a schema-valid default", () => ({ ...modeDefinition(), defaultValue: "unsupported" }), /default.*schema/i],
+		[
+			"schema-valid UI choices",
+			() => ({
+				...modeDefinition(),
+				ui: { control: "select" as const, choices: [{ label: "Unsupported", value: "unsupported" }] },
+			}),
+			/choice.*schema/i,
+		],
+		[
+			"a strict-JSON default",
+			() => ({ ...modeDefinition(), defaultValue: Number.NaN }),
+			/default.*strict JSON|strict JSON.*default/i,
+		],
+		[
+			"strict-JSON UI choices",
+			() => ({
+				...modeDefinition(),
+				ui: { control: "select" as const, choices: [{ label: "Invalid", value: BigInt(1) }] },
+			}),
+			/choice.*strict JSON|strict JSON.*choice/i,
+		],
+		[
+			"unique UI choice labels",
+			() => ({
+				...modeDefinition(),
+				ui: {
+					control: "select" as const,
+					choices: [
+						{ label: "Mode", value: "full" },
+						{ label: "Mode", value: "compact" },
+					],
+				},
+			}),
+			/duplicate.*label/i,
+		],
+		[
+			"the UI default among its choices",
+			() => ({
+				...modeDefinition(),
+				ui: { control: "select" as const, choices: [{ label: "Compact", value: "compact" }] },
+			}),
+			/default.*choice/i,
+		],
+	] as const)("requires %s", async (_description, createDefinition, expectedError) => {
+		await expect(
+			loadSettingExtension((pi) => {
+				pi.registerSetting(createDefinition() as ExtensionSettingDefinition<typeof modeSchema>);
+			}),
+		).rejects.toThrow(expectedError);
+	});
+
+	it("rejects a duplicate key in one extension", async () => {
+		await expect(
+			loadSettingExtension((pi) => {
+				pi.registerSetting(modeDefinition());
+				pi.registerSetting(modeDefinition());
+			}),
+		).rejects.toThrow(/already registered/i);
+	});
+
+	it("rejects registration after extension initialization", async () => {
+		let capturedApi: ExtensionAPI | undefined;
+		await loadSettingExtension((pi) => {
+			capturedApi = pi;
+		});
+
+		expect(capturedApi).toBeDefined();
+		expect(() => capturedApi!.registerSetting(modeDefinition())).toThrow(/during extension initialization/i);
 	});
 });

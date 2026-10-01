@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
+import type { Static, TSchema } from "typebox";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
@@ -20,6 +21,11 @@ import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import {
+	cloneExtensionSettingDefinition,
+	type ExtensionSettingDefinition,
+	type ExtensionSettingHandle,
+} from "./extension-settings.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -175,6 +181,9 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getActiveTools: notInitialized,
 		getAllTools: notInitialized,
 		getSettings: notInitialized,
+		getExtensionSetting: notInitialized,
+		setExtensionSetting: notInitialized,
+		onExtensionSettingChange: notInitialized,
 		setActiveTools: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
@@ -283,6 +292,47 @@ function createExtensionAPI(
 				handlers.splice(handlerIndex, 1);
 				if (handlers.length === 0) extension.handlers.delete(event);
 			};
+		},
+
+		registerSetting<TSchemaType extends TSchema>(
+			definition: ExtensionSettingDefinition<TSchemaType>,
+		): ExtensionSettingHandle<Static<TSchemaType>> {
+			if (state !== "loading") {
+				throw new Error(`Extension settings may only be registered during extension initialization.`);
+			}
+			const clonedDefinition = cloneExtensionSettingDefinition(definition);
+			extension.settings ??= new Map();
+			const settings = extension.settings;
+			if (settings.has(clonedDefinition.key)) {
+				throw new Error(
+					`Extension setting "${clonedDefinition.key}" is already registered by extension "${extension.path}".`,
+				);
+			}
+			settings.set(
+				clonedDefinition.key,
+				Object.freeze({ definition: clonedDefinition, sourceInfo: extension.sourceInfo }),
+			);
+
+			const key = clonedDefinition.key;
+			return Object.freeze({
+				key,
+				get(): Static<TSchemaType> {
+					assertActive();
+					return runtime.getExtensionSetting(extension.path, key) as Static<TSchemaType>;
+				},
+				set(value: Static<TSchemaType>, options?: { scope?: "global" | "project" }): void {
+					assertActive();
+					runtime.setExtensionSetting(extension.path, key, value, options?.scope ?? "global");
+				},
+				onChange(listener: (value: Static<TSchemaType>) => void): () => void {
+					assertActive();
+					return runtime.trackEventBusSubscription(
+						runtime.onExtensionSettingChange(extension.path, key, (value) =>
+							listener(value as Static<TSchemaType>),
+						),
+					);
+				},
+			});
 		},
 
 		registerTool(tool: ToolDefinition): void {
