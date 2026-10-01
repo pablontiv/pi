@@ -10,9 +10,13 @@ import {
 	Text,
 	type TUI,
 	type TuiMouseEvent,
+	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { TranscriptBlockDescriptor } from "../../../core/extensions/transcript-presentation.ts";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
-import type { Theme } from "../theme/theme.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
+import type { Theme, ThemeBg } from "../theme/theme.ts";
 
 /**
  * What this component needs from a tool: how to draw it. It neither executes tools nor reads their
@@ -211,6 +215,16 @@ export class ToolExecutionComponent extends Container {
 		this.maybeConvertImagesForKitty();
 	}
 
+	getTranscriptDescriptor(): TranscriptBlockDescriptor {
+		return {
+			id: this.toolCallId,
+			kind: "tool",
+			toolName: this.toolName,
+			state: this.isPartial ? "pending" : this.result?.isError ? "error" : "success",
+			capabilities: { summary: true, expandable: true },
+		};
+	}
+
 	private maybeConvertImagesForKitty(): void {
 		const caps = getCapabilities();
 		if (caps.images !== "kitty") return;
@@ -246,6 +260,10 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	isExpanded(): boolean {
+		return this.expanded;
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -259,6 +277,29 @@ export class ToolExecutionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
+	}
+
+	renderSummary(width: number): string[] {
+		let status = theme.fg("muted", "[running]");
+		if (this.result && !this.isPartial) {
+			status = this.result.isError ? theme.fg("error", "[error]") : theme.fg("success", "[ok]");
+		}
+		const availableWidth = Math.max(0, width - visibleWidth(status) - 2);
+		const renderedCall = this.callRendererComponent?.render(width) ?? [];
+		let callLine = renderedCall.find((line) => stripAnsi(line).trim().length > 0);
+		if (!callLine) {
+			const serializedArgs = JSON.stringify(this.args);
+			callLine = `${theme.fg("toolTitle", theme.bold(this.toolName))}${serializedArgs ? ` ${serializedArgs}` : ""}`;
+		}
+		const backgroundToken = this.getBackgroundToken();
+		const backgroundAnsi = theme.getBgAnsi(backgroundToken);
+		const header = truncateToWidth(callLine.trim(), availableWidth, "...").replaceAll(
+			"\x1b[0m",
+			`\x1b[0m${backgroundAnsi}`,
+		);
+		const line = visibleWidth(header) > 0 ? ` ${header} ${status}` : status;
+		const paddedLine = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		return [theme.bg(backgroundToken, paddedLine)];
 	}
 
 	override render(width: number): string[] {
@@ -412,6 +453,11 @@ export class ToolExecutionComponent extends Container {
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
 			this.hideComponent = true;
 		}
+	}
+
+	private getBackgroundToken(): ThemeBg {
+		if (this.isPartial) return "toolPendingBg";
+		return this.result?.isError ? "toolErrorBg" : "toolSuccessBg";
 	}
 
 	private getTextOutput(): string {
