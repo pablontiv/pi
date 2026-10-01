@@ -111,6 +111,144 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("extension settings", () => {
+		it("reads independent global and project layers and persists flat keys", async () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensionSettings: { "acme.mode": "full" } }));
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ extensionSettings: { "acme.mode": "compact" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getExtensionSettingLayers("acme.mode")).toEqual({
+				global: "full",
+				project: "compact",
+			});
+
+			manager.setExtensionSetting("acme.display", { density: "comfortable" });
+			manager.setExtensionSetting("acme.display", { density: "dense" }, "project");
+			await manager.flush();
+
+			const global = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			const project = JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf-8"));
+			expect(global.extensionSettings).toEqual({
+				"acme.mode": "full",
+				"acme.display": { density: "comfortable" },
+			});
+			expect(project.extensionSettings).toEqual({
+				"acme.mode": "compact",
+				"acme.display": { density: "dense" },
+			});
+			expect(global.acme).toBeUndefined();
+			expect(project.acme).toBeUndefined();
+		});
+
+		it("treats each extension value as atomic when merging scopes", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					extensionSettings: {
+						"acme.mode": { layout: "wide", shared: { global: true } },
+						"global.only": true,
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					extensionSettings: {
+						"acme.mode": { shared: { project: true } },
+						"project.only": true,
+					},
+				}),
+			);
+
+			const settings = SettingsManager.create(projectDir, agentDir).getSettings();
+			expect(settings.extensionSettings).toEqual({
+				"acme.mode": { shared: { project: true } },
+				"global.only": true,
+				"project.only": true,
+			});
+		});
+
+		it("defensively copies inputs and returned layers", () => {
+			const manager = SettingsManager.inMemory();
+			const input = { nested: { enabled: true }, items: [1, 2] };
+			manager.setExtensionSetting("acme.value", input);
+
+			input.nested.enabled = false;
+			input.items.push(3);
+			const first = manager.getExtensionSettingLayers("acme.value");
+			expect(first.global).toEqual({ nested: { enabled: true }, items: [1, 2] });
+
+			const returned = first.global as { nested: { enabled: boolean }; items: number[] };
+			returned.nested.enabled = false;
+			returned.items.push(3);
+			expect(manager.getExtensionSettingLayers("acme.value").global).toEqual({
+				nested: { enabled: true },
+				items: [1, 2],
+			});
+		});
+
+		it("rejects non-JSON values before mutating settings", async () => {
+			const manager = SettingsManager.inMemory({ extensionSettings: { existing: "value" } });
+			const cycle: { self?: unknown } = {};
+			cycle.self = cycle;
+			const sparse = new Array<unknown>(1);
+			const invalidValues: unknown[] = [undefined, Number.POSITIVE_INFINITY, 1n, cycle, sparse, new Date()];
+
+			for (const value of invalidValues) {
+				expect(() => manager.setExtensionSetting("invalid", value)).toThrow();
+				expect(manager.getExtensionSettingLayers("invalid")).toEqual({
+					global: undefined,
+					project: undefined,
+				});
+			}
+			await manager.flush();
+			expect(manager.getExtensionSettingLayers("existing").global).toBe("value");
+		});
+
+		it("rejects untrusted project writes before mutation", async () => {
+			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
+			writeFileSync(projectSettingsPath, JSON.stringify({ extensionSettings: { "existing.project": "unchanged" } }));
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+
+			expect(() => manager.setExtensionSetting("acme.mode", "compact", "project")).toThrow(
+				"Project is not trusted; refusing to write project settings",
+			);
+			await manager.flush();
+
+			expect(manager.getExtensionSettingLayers("acme.mode")).toEqual({
+				global: undefined,
+				project: undefined,
+			});
+			expect(JSON.parse(readFileSync(projectSettingsPath, "utf-8"))).toEqual({
+				extensionSettings: { "existing.project": "unchanged" },
+			});
+		});
+
+		it("preserves extension keys written by stale managers and external editors", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ extensionSettings: { "external.existing": { enabled: true } } }));
+			const first = SettingsManager.create(projectDir, agentDir);
+			const second = SettingsManager.create(projectDir, agentDir);
+			const externallyEdited = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			externallyEdited.extensionSettings["external.added"] = "preserved";
+			writeFileSync(settingsPath, JSON.stringify(externallyEdited));
+
+			first.setExtensionSetting("first.value", 1);
+			second.setExtensionSetting("second.value", 2);
+			await Promise.all([first.flush(), second.flush()]);
+
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensionSettings).toEqual({
+				"external.existing": { enabled: true },
+				"external.added": "preserved",
+				"first.value": 1,
+				"second.value": 2,
+			});
+		});
+	});
+
 	describe("deviceId", () => {
 		it("creates one global device ID and reuses it in later processes", async () => {
 			const settingsPath = join(agentDir, "settings.json");
