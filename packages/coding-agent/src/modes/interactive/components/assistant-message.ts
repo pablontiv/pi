@@ -23,6 +23,9 @@ export class AssistantMessageComponent extends Container {
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private resolveTranscriptPresentation: (block: Readonly<TranscriptBlockDescriptor>) => TranscriptPresentation;
+	private getRelatedToolDescriptor: (
+		toolCall: Readonly<{ id: string; name: string }>,
+	) => TranscriptBlockDescriptor | undefined;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
@@ -38,6 +41,9 @@ export class AssistantMessageComponent extends Container {
 		resolveTranscriptPresentation: (block: Readonly<TranscriptBlockDescriptor>) => TranscriptPresentation = () => ({
 			density: "full",
 		}),
+		getRelatedToolDescriptor: (
+			toolCall: Readonly<{ id: string; name: string }>,
+		) => TranscriptBlockDescriptor | undefined = () => undefined,
 	) {
 		super();
 
@@ -47,6 +53,7 @@ export class AssistantMessageComponent extends Container {
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
 		this.resolveTranscriptPresentation = resolveTranscriptPresentation;
+		this.getRelatedToolDescriptor = getRelatedToolDescriptor;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -152,16 +159,12 @@ export class AssistantMessageComponent extends Container {
 				const allRelatedToolsHidden =
 					hidden &&
 					relatedTools.length > 0 &&
-					relatedTools.every(
-						(toolCall) =>
-							this.resolveTranscriptPresentation({
-								id: toolCall.id,
-								kind: "tool",
-								toolName: toolCall.name,
-								state: "pending",
-								capabilities: { summary: true, expandable: true },
-							}).density === "hidden",
-					);
+					relatedTools.every((toolCall) => {
+						const descriptor = this.getRelatedToolDescriptor(toolCall);
+						return (
+							descriptor !== undefined && this.resolveTranscriptPresentation(descriptor).density === "hidden"
+						);
+					});
 				if (thinkingPresentation.density === "hidden" || (hidden && allRelatedToolsHidden)) {
 					continue;
 				}
