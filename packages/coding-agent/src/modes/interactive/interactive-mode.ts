@@ -89,6 +89,10 @@ import type {
 	UserBashEventResult,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import type {
+	TranscriptBlockDescriptor,
+	TranscriptPresentation,
+} from "../../core/extensions/transcript-presentation.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -174,6 +178,10 @@ import {
 import { ThemedText } from "./components/themed-text.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import {
+	TranscriptPresentationComponent,
+	type TranscriptSummaryRenderer,
+} from "./components/transcript-presentation.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -206,6 +214,10 @@ interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
 
+interface OutputPaddingComponent {
+	setOutputPad(padding: number): void;
+}
+
 interface ActiveEditor extends EditorComponent {
 	getCursor?(): { line: number; col: number };
 }
@@ -226,6 +238,10 @@ function isWorkingStatusEditor(editor: EditorComponent): editor is WorkingStatus
 
 function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
+}
+
+function hasOutputPadding(obj: unknown): obj is OutputPaddingComponent {
+	return typeof obj === "object" && obj !== null && "setOutputPad" in obj && typeof obj.setOutputPad === "function";
 }
 
 class ExpandableText extends ThemedText implements Expandable {
@@ -490,6 +506,12 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private readonly toolComponents = new Set<ToolExecutionComponent>();
+	private readonly assistantMessageComponents = new Set<AssistantMessageComponent>();
+	private readonly outputPaddingComponents = new Set<OutputPaddingComponent>();
+	private readonly expandableTranscriptComponents = new Set<Expandable>();
+	private readonly presentedComponents = new Map<Component, TranscriptPresentationComponent>();
+	private transcriptPresentationInvalidationUnsubscribe?: () => void;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -1981,7 +2003,7 @@ export class InteractiveMode {
 						return { cancelled: true };
 					}
 
-					this.chatContainer.clear();
+					this.clearChatContainer();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
@@ -2067,6 +2089,7 @@ export class InteractiveMode {
 		if (this.session !== session) {
 			return;
 		}
+		this.bindTranscriptPresentationInvalidation();
 
 		if (!options.renderBeforeBind) {
 			this.subscribeToAgent();
@@ -2148,13 +2171,82 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+	}
+
+	private resolveTranscriptPresentation(block: Readonly<TranscriptBlockDescriptor>): TranscriptPresentation {
+		return this.session.extensionRunner.resolveTranscriptPresentation(block);
+	}
+
+	private bindTranscriptPresentationInvalidation(): void {
+		this.transcriptPresentationInvalidationUnsubscribe?.();
+		this.transcriptPresentationInvalidationUnsubscribe =
+			this.session.extensionRunner.onTranscriptPresentationInvalidated(() => {
+				this.chatContainer.invalidate();
+				this.ui.requestRender();
+			});
+	}
+
+	private addPresentedComponent(
+		component: Component,
+		descriptor: () => TranscriptBlockDescriptor,
+		options: {
+			renderSummary?: TranscriptSummaryRenderer;
+			isExpanded?: () => boolean;
+			tool?: ToolExecutionComponent;
+			assistant?: AssistantMessageComponent;
+			outputPadding?: OutputPaddingComponent;
+			expandable?: Expandable;
+		} = {},
+	): TranscriptPresentationComponent {
+		const presented = new TranscriptPresentationComponent({
+			component,
+			descriptor,
+			resolve: (block) => this.resolveTranscriptPresentation(block),
+			renderSummary: options.renderSummary,
+			isExpanded: options.isExpanded ?? (options.expandable ? () => this.toolOutputExpanded : undefined),
+		});
+		this.chatContainer.addChild(presented);
+		this.presentedComponents.set(component, presented);
+		if (options.tool) this.toolComponents.add(options.tool);
+		if (options.assistant) this.assistantMessageComponents.add(options.assistant);
+		if (options.outputPadding) this.outputPaddingComponents.add(options.outputPadding);
+		if (options.expandable) this.expandableTranscriptComponents.add(options.expandable);
+		return presented;
+	}
+
+	private addToolExecutionComponent(component: ToolExecutionComponent): TranscriptPresentationComponent {
+		return this.addPresentedComponent(component, () => component.getTranscriptDescriptor(), {
+			renderSummary: (width) => component.renderSummary(width),
+			isExpanded: () => component.isExpanded(),
+			tool: component,
+			expandable: component,
+		});
+	}
+
+	private removePresentedComponent(component: Component): void {
+		const presented = this.presentedComponents.get(component);
+		if (presented) this.chatContainer.removeChild(presented);
+		this.presentedComponents.delete(component);
+		if (component instanceof ToolExecutionComponent) this.toolComponents.delete(component);
+		if (component instanceof AssistantMessageComponent) this.assistantMessageComponents.delete(component);
+		if (hasOutputPadding(component)) this.outputPaddingComponents.delete(component);
+		if (isExpandable(component)) this.expandableTranscriptComponents.delete(component);
+	}
+
+	private clearChatContainer(): void {
+		this.chatContainer.clear();
+		this.presentedComponents.clear();
+		this.toolComponents.clear();
+		this.assistantMessageComponents.clear();
+		this.outputPaddingComponents.clear();
+		this.expandableTranscriptComponents.clear();
 	}
 
 	/**
@@ -2318,10 +2410,8 @@ export class InteractiveMode {
 
 	private setHiddenThinkingLabel(label?: string): void {
 		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
+		for (const component of this.assistantMessageComponents) {
+			component.setHiddenThinkingLabel(this.hiddenThinkingLabel);
 		}
 		if (this.streamingComponent) {
 			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
@@ -3388,7 +3478,7 @@ export class InteractiveMode {
 				} else if (event.entry.type === "compaction") {
 					const entries = this.sessionManager.buildContextEntries();
 					if (entries[0]?.id !== event.entry.id) break;
-					this.chatContainer.clear();
+					this.clearChatContainer();
 					const branch = this.sessionManager.getBranch();
 					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
 					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
@@ -3438,9 +3528,20 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
+						(block) => this.resolveTranscriptPresentation(block),
 					);
 					this.streamingMessage = event.message;
-					this.chatContainer.addChild(this.streamingComponent);
+					this.addPresentedComponent(
+						this.streamingComponent,
+						() => ({
+							kind: "assistant-message",
+							capabilities: { summary: false, expandable: false },
+						}),
+						{
+							assistant: this.streamingComponent,
+							outputPadding: this.streamingComponent,
+						},
+					);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
 				}
@@ -3467,7 +3568,7 @@ export class InteractiveMode {
 									this.sessionManager.getCwd(),
 								);
 								component.setExpanded(this.toolOutputExpanded);
-								this.chatContainer.addChild(component);
+								this.addToolExecutionComponent(component);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -3545,7 +3646,7 @@ export class InteractiveMode {
 						this.sessionManager.getCwd(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
+					this.addToolExecutionComponent(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
 				component.markExecutionStarted();
@@ -3578,7 +3679,7 @@ export class InteractiveMode {
 				}
 				this.clearStatusIndicator("working");
 				if (this.streamingComponent) {
-					this.chatContainer.removeChild(this.streamingComponent);
+					this.removePresentedComponent(this.streamingComponent);
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 				}
@@ -3625,7 +3726,7 @@ export class InteractiveMode {
 					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
-					this.chatContainer.clear();
+					this.clearChatContainer();
 					// The latest compaction is prepended for model context; append it below at its chronological position.
 					this.renderSessionEntries(entries.slice(1));
 					this.addMessageToChat(
@@ -3776,15 +3877,19 @@ export class InteractiveMode {
 			return;
 		}
 
+		const presented = this.addPresentedComponent(
+			component,
+			() => ({ kind: "custom-entry", capabilities: { summary: false, expandable: true } }),
+			{ expandable: component },
+		);
 		if (this.streamingComponent) {
-			const streamingIndex = this.chatContainer.children.indexOf(this.streamingComponent);
+			const streamingPresentation = this.presentedComponents.get(this.streamingComponent);
+			const streamingIndex = streamingPresentation ? this.chatContainer.children.indexOf(streamingPresentation) : -1;
 			if (streamingIndex >= 0) {
-				this.chatContainer.children.splice(streamingIndex, 0, component);
-				return;
+				this.chatContainer.removeChild(presented);
+				this.chatContainer.children.splice(streamingIndex, 0, presented);
 			}
 		}
-
-		this.chatContainer.addChild(component);
 	}
 
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
@@ -3800,7 +3905,11 @@ export class InteractiveMode {
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
 				);
-				this.chatContainer.addChild(component);
+				this.addPresentedComponent(
+					component,
+					() => ({ kind: "bash", capabilities: { summary: false, expandable: true } }),
+					{ expandable: component },
+				);
 				break;
 			}
 			case "custom": {
@@ -3813,7 +3922,11 @@ export class InteractiveMode {
 						this.outputPad,
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
+					this.addPresentedComponent(
+						component,
+						() => ({ kind: "custom-message", capabilities: { summary: false, expandable: true } }),
+						{ outputPadding: component, expandable: component },
+					);
 				}
 				break;
 			}
@@ -3821,14 +3934,22 @@ export class InteractiveMode {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				this.addPresentedComponent(
+					component,
+					() => ({ kind: "summary", capabilities: { summary: false, expandable: true } }),
+					{ expandable: component },
+				);
 				break;
 			}
 			case "branchSummary": {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				this.addPresentedComponent(
+					component,
+					() => ({ kind: "summary", capabilities: { summary: false, expandable: true } }),
+					{ expandable: component },
+				);
 				break;
 			}
 			case "system":
@@ -3847,7 +3968,11 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						this.addPresentedComponent(
+							component,
+							() => ({ kind: "user-message", capabilities: { summary: false, expandable: true } }),
+							{ expandable: component },
+						);
 						// Render user message separately if present
 						if (skillBlock.userMessage) {
 							this.chatContainer.addChild(new Spacer(1));
@@ -3857,7 +3982,14 @@ export class InteractiveMode {
 								this.outputPad,
 								this.getMarkdownTransformers(),
 							);
-							this.chatContainer.addChild(userComponent);
+							this.addPresentedComponent(
+								userComponent,
+								() => ({
+									kind: "user-message",
+									capabilities: { summary: false, expandable: false },
+								}),
+								{ outputPadding: userComponent },
+							);
 						}
 					} else {
 						const userComponent = new UserMessageComponent(
@@ -3866,7 +3998,14 @@ export class InteractiveMode {
 							this.outputPad,
 							this.getMarkdownTransformers(),
 						);
-						this.chatContainer.addChild(userComponent);
+						this.addPresentedComponent(
+							userComponent,
+							() => ({
+								kind: "user-message",
+								capabilities: { summary: false, expandable: false },
+							}),
+							{ outputPadding: userComponent },
+						);
 					}
 					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
@@ -3882,8 +4021,16 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
+					(block) => this.resolveTranscriptPresentation(block),
 				);
-				this.chatContainer.addChild(assistantComponent);
+				this.addPresentedComponent(
+					assistantComponent,
+					() => ({
+						kind: "assistant-message",
+						capabilities: { summary: false, expandable: false },
+					}),
+					{ assistant: assistantComponent, outputPadding: assistantComponent },
+				);
 				break;
 			}
 			case "toolResult": {
@@ -3947,7 +4094,7 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						this.addToolExecutionComponent(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -4163,7 +4310,7 @@ export class InteractiveMode {
 	}
 
 	private rebuildChatFromMessages(): void {
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
 	}
 
@@ -4464,11 +4611,20 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
-			for (const child of container.children) {
-				if (isExpandable(child)) {
-					child.setExpanded(expanded);
-				}
+		for (const tool of this.toolComponents) {
+			tool.setExpanded(expanded);
+		}
+		for (const component of this.expandableTranscriptComponents) {
+			if (!this.toolComponents.has(component as ToolExecutionComponent)) {
+				component.setExpanded(expanded);
+			}
+		}
+		for (const child of this.loadedResourcesContainer.children) {
+			if (isExpandable(child)) child.setExpanded(expanded);
+		}
+		for (const child of this.chatContainer.children) {
+			if (!(child instanceof TranscriptPresentationComponent) && isExpandable(child)) {
+				child.setExpanded(expanded);
 			}
 		}
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
@@ -4476,10 +4632,8 @@ export class InteractiveMode {
 
 	/** Update rendered assistant messages without rebuilding live tool components. */
 	private updateThinkingBlockVisibility(): void {
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.hideThinkingBlock);
-			}
+		for (const component of this.assistantMessageComponents) {
+			component.setHideThinkingBlock(this.hideThinkingBlock);
 		}
 		this.ui.requestRender();
 	}
@@ -4861,18 +5015,14 @@ export class InteractiveMode {
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setShowImages(enabled);
-							}
+						for (const component of this.toolComponents) {
+							component.setShowImages(enabled);
 						}
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setImageWidthCells(width);
-							}
+						for (const component of this.toolComponents) {
+							component.setImageWidthCells(width);
 						}
 					},
 					onAutoResizeImagesChange: (enabled) => {
@@ -4977,14 +5127,8 @@ export class InteractiveMode {
 						this.settingsManager.setOutputPad(padding);
 						this.outputPad = padding;
 						if (this.streamingComponent || this.session.isStreaming) {
-							for (const child of this.chatContainer.children) {
-								if (
-									child instanceof AssistantMessageComponent ||
-									child instanceof CustomMessageComponent ||
-									child instanceof UserMessageComponent
-								) {
-									child.setOutputPad(padding);
-								}
+							for (const component of this.outputPaddingComponents) {
+								component.setOutputPad(padding);
 							}
 							if (this.streamingComponent) {
 								this.streamingComponent.setOutputPad(padding);
@@ -5571,7 +5715,7 @@ export class InteractiveMode {
 						}
 
 						// Update UI
-						this.chatContainer.clear();
+						this.clearChatContainer();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
@@ -6379,6 +6523,7 @@ export class InteractiveMode {
 			}
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			this.outputPad = this.settingsManager.getOutputPad();
+			this.bindTranscriptPresentationInvalidation();
 			this.rebuildChatFromMessages();
 			chatRestoredBeforeSessionStart = true;
 		};
@@ -7016,6 +7161,8 @@ export class InteractiveMode {
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		this.transcriptPresentationInvalidationUnsubscribe?.();
+		this.transcriptPresentationInvalidationUnsubscribe = undefined;
 		if (this.isInitialized) {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;

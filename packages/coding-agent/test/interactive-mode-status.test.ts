@@ -144,16 +144,19 @@ describe("InteractiveMode.showManagedToolStatus", () => {
 });
 
 describe("InteractiveMode.setToolsExpanded", () => {
-	test("applies expansion state to the active header and chat entries", () => {
+	test("applies expansion state to the active header, non-tool entries, and explicitly tracked wrapped tools", () => {
 		const header = { setExpanded: vi.fn() };
 		const loadedResourcesChild = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
+		const wrappedToolChild = { setExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			customHeader: undefined,
 			builtInHeader: header,
 			loadedResourcesContainer: { children: [loadedResourcesChild] },
 			chatContainer: { children: [chatChild] },
+			toolComponents: new Set([wrappedToolChild]),
+			expandableTranscriptComponents: new Set(),
 			ui: { requestRender: vi.fn() },
 			showStatus: vi.fn(),
 		};
@@ -164,6 +167,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(loadedResourcesChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(wrappedToolChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool output: expanded");
 	});
 });
