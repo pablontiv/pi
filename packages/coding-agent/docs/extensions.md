@@ -66,6 +66,28 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 `agent_before_settle` is the final actionable boundary: it can append entries and request one continuation.
 `agent_settled` is final and notification-only; use it when an integration needs to know Pi will not continue automatically.
 
+<a id="extension-owned-settings"></a>
+
+## Extension-owned settings
+
+Extensions can register typed settings that persist in Pi's global or project settings. Registration happens while the extension factory loads and is the only time `pi.registerSetting()` may be called. Registration does not read or write stored values.
+
+A setting key is a flat, lowercase, namespaced string. It must contain at least one dot and uses lowercase alphanumeric segments separated by single dots or hyphens. Use a key such as `example.display-mode`; do not use nested objects or prototype-sensitive segments such as `__proto__`.
+
+`registerSetting()` returns an owner-only handle. The handle has `get()`, `set()`, and `onChange()`. Call these methods only from runtime handlers such as commands or session events, after the extension runtime has been bound. A handle from a previous load is stale after reload and cannot be used by the replacement runtime.
+
+The default write scope is `global`. Pass `{ scope: "project" }` to write a project value. The effective value is selected in this order: project, global, then the registered default. Project values are available and writable only after project trust has been granted. A global write does not replace a project override.
+
+A definition can include optional `ui` metadata with a `select` control and labeled choices. These choices let `/settings` display and edit the setting. A setting without this metadata remains available through its handle.
+
+Stored values must be strict JSON and must satisfy the registered TypeBox schema. Pi ignores an invalid project or global value, falls through to the next valid layer, and reports a settings diagnostic. If no stored layer is valid, the default is used. Invalid definitions or defaults fail registration instead of becoming runtime values.
+
+`onChange()` receives the new effective value. A listener runs only when a write changes that effective value, not merely when a lower-precedence layer changes. Unsubscribe listeners during `session_shutdown`; reload also invalidates the old runtime's subscriptions.
+
+`pi.getSettings()` remains a snapshot of core settings. It omits the raw `extensionSettings` map. That map is not a public extension API: an extension can read or mutate its own values only through its handles, and cannot use another extension's handle or key.
+
+The checked [`extension-setting.ts`](../examples/extensions/extension-setting.ts) example registers a literal-union setting during factory load, subscribes after `session_start`, uses global and project writes from a command, and unsubscribes during `session_shutdown`.
+
 <a id="extensionapi-methods"></a>
 
 ## Choose an integration point

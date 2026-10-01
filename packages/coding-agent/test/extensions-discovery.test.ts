@@ -507,6 +507,18 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].handlers.has("agent_end")).toBe(true);
 	});
 
+	it("loads the checked extension-owned setting example", async () => {
+		const examplePath = path.resolve(__dirname, "../examples/extensions/extension-setting.ts");
+		const result = await discoverAndLoadExtensions([examplePath], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].settings?.has("example.display-mode")).toBe(true);
+		expect(result.extensions[0].commands.has("extension-setting")).toBe(true);
+		expect(result.extensions[0].handlers.has("session_start")).toBe(true);
+		expect(result.extensions[0].handlers.has("session_shutdown")).toBe(true);
+	});
+
 	it("loads extension with shortcuts", async () => {
 		const extCode = `
 			export default function(pi) {
