@@ -305,12 +305,25 @@ describe("extension setting runtime", () => {
 		expect(listener).not.toHaveBeenCalled();
 	});
 
-	it("writes selector values through the winning owner at global scope", async () => {
+	it("writes detached typed selector values through the winning owner at global scope", async () => {
 		const { runner, settingsManager } = await createRunner([
 			{
 				path: "<inline:first>",
 				factory: (pi) => {
-					pi.registerSetting(stringSetting("acme.mode", "first"));
+					pi.registerSetting({
+						key: "acme.mode",
+						schema: Type.Object({ strategy: Type.String() }),
+						defaultValue: { strategy: "first" },
+						title: "Mode",
+						description: "Mode",
+						ui: {
+							control: "select",
+							choices: [
+								{ label: "First label", value: { strategy: "first" } },
+								{ label: "Selected label", value: { strategy: "selected" } },
+							],
+						},
+					});
 				},
 			},
 			{
@@ -320,10 +333,13 @@ describe("extension setting runtime", () => {
 				},
 			},
 		]);
+		const selected = { strategy: "selected" };
 
-		runner.setExtensionSettingValue("acme.mode", "selected");
+		runner.setExtensionSettingValue("acme.mode", selected);
+		selected.strategy = "mutated";
+
 		expect(settingsManager.getExtensionSettingLayers("acme.mode")).toEqual({
-			global: "selected",
+			global: { strategy: "selected" },
 			project: undefined,
 		});
 		expect(() => runner.setExtensionSettingValue("missing.key", "value")).toThrow(/not registered/i);

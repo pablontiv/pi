@@ -54,6 +54,7 @@ import {
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { spawn } from "child_process";
+import { Check, Equal } from "typebox/value";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -163,7 +164,7 @@ import { playPiLogoAnimation } from "./components/pi-logo-animation.lazy.ts";
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
-import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { type ExtensionSettingSelectorItem, SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import {
 	BranchSummaryStatusIndicator,
@@ -4822,6 +4823,46 @@ export class InteractiveMode {
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
 			let selector: SettingsSelectorComponent | undefined;
+			const extensionRunner = this.session.extensionRunner;
+			const registeredExtensionSettings = extensionRunner.getRegisteredSettings();
+			const currentExtensionSettingLabel = (setting: (typeof registeredExtensionSettings)[number]): string => {
+				const { definition } = setting;
+				let effectiveValue: unknown = definition.defaultValue;
+				try {
+					const layers = this.settingsManager.getExtensionSettingLayers(definition.key);
+					if (layers.global !== undefined && Check(definition.schema, layers.global)) {
+						effectiveValue = layers.global;
+					}
+					if (layers.project !== undefined && Check(definition.schema, layers.project)) {
+						effectiveValue = layers.project;
+					}
+				} catch {
+					// The registry uses the registered default when persisted layers cannot be read or validated.
+				}
+				return definition.ui?.choices.find((choice) => Equal(choice.value, effectiveValue))?.label ?? "(custom)";
+			};
+			const extensionSettingRegistrations = new Map(
+				registeredExtensionSettings.map((setting) => [setting.definition.key, setting]),
+			);
+			const extensionSettingLabels = new Map<string, string>();
+			const extensionSettings: ExtensionSettingSelectorItem[] = registeredExtensionSettings.flatMap((setting) => {
+				const { definition } = setting;
+				if (!definition.ui) return [];
+				const currentValueLabel = currentExtensionSettingLabel(setting);
+				extensionSettingLabels.set(definition.key, currentValueLabel);
+				return [
+					{
+						key: definition.key,
+						title: definition.title,
+						description: definition.description,
+						currentValueLabel,
+						choices: definition.ui.choices.map((choice) => ({
+							label: choice.label,
+							value: structuredClone(choice.value),
+						})),
+					},
+				];
+			});
 			const defaultProvider = this.settingsManager.getDefaultProvider();
 			const defaultModelId = this.settingsManager.getDefaultModel();
 			const defaultModel = defaultProvider && defaultModelId ? `${defaultProvider}/${defaultModelId}` : "not set";
@@ -4868,6 +4909,7 @@ export class InteractiveMode {
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 					fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
 					warnings: this.settingsManager.getWarnings(),
+					extensionSettings,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5053,6 +5095,22 @@ export class InteractiveMode {
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
+					},
+					onExtensionSettingChange: (key, value) => {
+						const itemId = `extension-setting:${key}`;
+						const previousLabel = extensionSettingLabels.get(key) ?? "(custom)";
+						try {
+							extensionRunner.setExtensionSettingValue(key, value);
+							const setting = extensionSettingRegistrations.get(key);
+							if (setting) {
+								const currentLabel = currentExtensionSettingLabel(setting);
+								extensionSettingLabels.set(key, currentLabel);
+								selector?.getSettingsList().updateValue(itemId, currentLabel);
+							}
+						} catch (error) {
+							selector?.getSettingsList().updateValue(itemId, previousLabel);
+							this.showError(error instanceof Error ? error.message : String(error));
+						}
 					},
 					onCancel: () => {
 						done();
