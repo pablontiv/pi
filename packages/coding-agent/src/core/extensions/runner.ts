@@ -657,6 +657,11 @@ export class ExtensionRunner {
 		return this.settingRegistry.getDiagnostics();
 	}
 
+	getExtensionSettingValue(key: string): unknown {
+		this.assertActive();
+		return this.settingRegistry.getValue(key);
+	}
+
 	setExtensionSettingValue(key: string, value: unknown): void {
 		this.assertActive();
 		this.settingRegistry.setValue(key, value);

@@ -152,6 +152,12 @@ export class ExtensionSettingsRegistry {
 		};
 	}
 
+	getValue(key: string): unknown {
+		const entry = this.registrations.get(key);
+		if (entry === undefined) throw new Error(`Extension setting "${key}" is not registered.`);
+		return copySettingValue(key, "value", this.resolve(entry));
+	}
+
 	setValue(key: string, value: unknown): void {
 		const entry = this.registrations.get(key);
 		if (entry === undefined) throw new Error(`Extension setting "${key}" is not registered.`);
@@ -207,7 +213,14 @@ export class ExtensionSettingsRegistry {
 			this.addInvalidLayerDiagnostic(entry, layer, error instanceof Error ? error.message : String(error));
 			return { valid: false };
 		}
-		if (!checkSettingValue(definition.key, definition.schema, copiedValue)) {
+		let valid: boolean;
+		try {
+			valid = checkSettingValue(definition.key, definition.schema, copiedValue);
+		} catch (error) {
+			this.addInvalidLayerDiagnostic(entry, layer, error instanceof Error ? error.message : String(error));
+			return { valid: false };
+		}
+		if (!valid) {
 			this.addInvalidLayerDiagnostic(entry, layer, "value does not satisfy its schema");
 			return { valid: false };
 		}

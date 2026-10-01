@@ -54,7 +54,7 @@ import {
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { spawn } from "child_process";
-import { Check, Equal } from "typebox/value";
+import { Equal } from "typebox/value";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -4827,18 +4827,7 @@ export class InteractiveMode {
 			const registeredExtensionSettings = extensionRunner.getRegisteredSettings();
 			const currentExtensionSettingLabel = (setting: (typeof registeredExtensionSettings)[number]): string => {
 				const { definition } = setting;
-				let effectiveValue: unknown = definition.defaultValue;
-				try {
-					const layers = this.settingsManager.getExtensionSettingLayers(definition.key);
-					if (layers.global !== undefined && Check(definition.schema, layers.global)) {
-						effectiveValue = layers.global;
-					}
-					if (layers.project !== undefined && Check(definition.schema, layers.project)) {
-						effectiveValue = layers.project;
-					}
-				} catch {
-					// The registry uses the registered default when persisted layers cannot be read or validated.
-				}
+				const effectiveValue = extensionRunner.getExtensionSettingValue(definition.key);
 				return definition.ui?.choices.find((choice) => Equal(choice.value, effectiveValue))?.label ?? "(custom)";
 			};
 			const extensionSettingRegistrations = new Map(

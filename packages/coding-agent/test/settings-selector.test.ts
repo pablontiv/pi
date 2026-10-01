@@ -116,6 +116,31 @@ describe("SettingsSelectorComponent", () => {
 		expect(onExtensionSettingChange.mock.calls[0]?.[1]).not.toBe(extensionSettings[0]?.choices[0]?.value);
 	});
 
+	it("does not append extension settings without a persistence callback", () => {
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+			extensionSettings: [
+				{
+					key: "acme.mode",
+					title: "Acme mode",
+					description: "Mode",
+					currentValueLabel: "First",
+					choices: [{ label: "First", value: 1 }],
+				},
+			],
+		} as unknown as SettingsConfig;
+		const callbacks = { onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		const items = Reflect.get(list, "items") as Array<{ id: string }>;
+
+		expect(items.some((item) => item.id === "extension-setting:acme.mode")).toBe(false);
+	});
+
 	it("cycles a custom extension value to the first typed choice", () => {
 		const config = {
 			defaultModel: "not set",

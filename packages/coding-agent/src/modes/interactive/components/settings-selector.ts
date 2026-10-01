@@ -876,16 +876,18 @@ export class SettingsSelectorComponent extends Container {
 		});
 
 		const extensionSettingsById = new Map<string, ExtensionSettingSelectorItem>();
-		for (const setting of config.extensionSettings ?? []) {
-			const id = `extension-setting:${setting.key}`;
-			extensionSettingsById.set(id, setting);
-			items.push({
-				id,
-				label: setting.title,
-				description: setting.description,
-				currentValue: setting.currentValueLabel,
-				values: setting.choices.map((choice) => choice.label),
-			});
+		if (callbacks.onExtensionSettingChange) {
+			for (const setting of config.extensionSettings ?? []) {
+				const id = `extension-setting:${setting.key}`;
+				extensionSettingsById.set(id, setting);
+				items.push({
+					id,
+					label: setting.title,
+					description: setting.description,
+					currentValue: setting.currentValueLabel,
+					values: setting.choices.map((choice) => choice.label),
+				});
+			}
 		}
 
 		// Add borders

@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
+import type { ExtensionSettingsActions } from "../src/core/extensions/extension-settings.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type {
@@ -79,6 +80,7 @@ describe("extension setting runtime", () => {
 	async function createRunner(
 		factories: Array<{ path: string; factory: ExtensionFactory }>,
 		settings: { global?: Record<string, unknown>; project?: Record<string, unknown> } = {},
+		settingActions?: ExtensionSettingsActions,
 	) {
 		if (settings.global) {
 			fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ extensionSettings: settings.global }));
@@ -103,7 +105,7 @@ describe("extension setting runtime", () => {
 			projectDir,
 			SessionManager.inMemory(),
 			await createInMemoryModelRegistry(AuthStorage.inMemory()),
-			{
+			settingActions ?? {
 				getExtensionSettingLayers: (key) => settingsManager.getExtensionSettingLayers(key),
 				setExtensionSetting: (key, value, scope) => settingsManager.setExtensionSetting(key, value, scope),
 			},
@@ -179,6 +181,85 @@ describe("extension setting runtime", () => {
 		fallbackHandle.get();
 		invalidGlobalHandle.get();
 		expect(errors).toHaveLength(3);
+	});
+
+	it("returns detached effective values and falls through non-JSON stored layers", async () => {
+		let handle!: ExtensionSettingHandle<unknown>;
+		const { runner } = await createRunner(
+			[
+				{
+					path: "<inline:owner>",
+					factory: (pi) => {
+						handle = pi.registerSetting({
+							key: "acme.permissive",
+							schema: Type.Unknown(),
+							defaultValue: { nested: { value: "default" } },
+							title: "Permissive",
+							description: "Permissive",
+						});
+					},
+				},
+			],
+			{},
+			{
+				getExtensionSettingLayers: () => ({
+					global: { nested: { value: "global" } },
+					project: { invalid: undefined },
+				}),
+				setExtensionSetting: () => {},
+			},
+		);
+		const errors: string[] = [];
+		runner.onError((error) => errors.push(error.error));
+
+		expect(handle.get()).toEqual({ nested: { value: "global" } });
+		const value = runner.getExtensionSettingValue("acme.permissive") as { nested: { value: string } };
+		expect(value).toEqual(handle.get());
+		value.nested.value = "mutated";
+		expect(runner.getExtensionSettingValue("acme.permissive")).toEqual({ nested: { value: "global" } });
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toMatch(/invalid project.*strict JSON/i);
+	});
+
+	it("falls through a stored value whose refinement throws and rejects the same value on write", async () => {
+		let handle!: ExtensionSettingHandle<string>;
+		const setExtensionSetting = vi.fn();
+		const schema = Type.Refine(Type.String(), (value) => {
+			if (value === "throws") throw new Error("broken refinement");
+			return true;
+		});
+		const { runner } = await createRunner(
+			[
+				{
+					path: "<inline:owner>",
+					factory: (pi) => {
+						handle = pi.registerSetting({
+							key: "acme.refined",
+							schema,
+							defaultValue: "default",
+							title: "Refined",
+							description: "Refined",
+						});
+					},
+				},
+			],
+			{},
+			{
+				getExtensionSettingLayers: () => ({ global: "global", project: "throws" }),
+				setExtensionSetting,
+			},
+		);
+		const errors: string[] = [];
+		runner.onError((error) => errors.push(error.error));
+
+		expect(handle.get()).toBe("global");
+		expect(runner.getExtensionSettingValue("acme.refined")).toBe("global");
+		expect(handle.get()).toBe("global");
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toMatch(/invalid project.*invalid TypeBox schema/i);
+		expect(() => handle.set("throws")).toThrow(/invalid TypeBox schema/i);
+		expect(setExtensionSetting).not.toHaveBeenCalled();
+		expect(errors).toHaveLength(1);
 	});
 
 	it("rejects non-JSON and schema-invalid writes before persistence", async () => {
@@ -301,6 +382,7 @@ describe("extension setting runtime", () => {
 		expect(() => handle.get()).toThrow("stale runtime");
 		expect(() => handle.set("next")).toThrow("stale runtime");
 		expect(() => handle.onChange(listener)).toThrow("stale runtime");
+		expect(() => runner.getExtensionSettingValue("acme.mode")).toThrow("stale runtime");
 		expect(() => runner.setExtensionSettingValue("acme.mode", "next")).toThrow("stale runtime");
 		expect(listener).not.toHaveBeenCalled();
 	});

@@ -10,6 +10,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 interface TestRunner {
 	getRegisteredSettings: () => readonly TestRegistration[];
+	getExtensionSettingValue: (key: string) => unknown;
 	setExtensionSettingValue: (key: string, value: unknown) => void;
 }
 
@@ -95,19 +96,29 @@ const registrations: readonly TestRegistration[] = [
 	},
 ];
 
-function createFixture(firstMode: { mode: string } = { mode: "careful" }) {
+function createFixture(options: { globalFirstMode?: { mode: string }; projectFirstMode?: { mode: string } } = {}) {
 	const settingsManager = SettingsManager.inMemory();
-	settingsManager.setExtensionSetting("first.mode", firstMode);
-	settingsManager.setExtensionSetting("second.enabled", true);
+	const globalValues = new Map<string, unknown>([
+		["first.mode", options.globalFirstMode ?? { mode: "careful" }],
+		["second.enabled", true],
+	]);
 	let active = true;
 	let writeError: Error | undefined;
+	const getExtensionSettingValue = vi.fn((key: string) => {
+		if (!active) throw new Error("stale runtime");
+		if (key === "first.mode" && options.projectFirstMode) return structuredClone(options.projectFirstMode);
+		const value = globalValues.get(key);
+		if (value !== undefined) return structuredClone(value);
+		return structuredClone(registrations.find((setting) => setting.definition.key === key)?.definition.defaultValue);
+	});
 	const setExtensionSettingValue = vi.fn((key: string, value: unknown) => {
 		if (!active) throw new Error("stale runtime");
 		if (writeError) throw writeError;
-		settingsManager.setExtensionSetting(key, value, "global");
+		globalValues.set(key, structuredClone(value));
 	});
 	const runner: TestRunner = {
 		getRegisteredSettings: () => registrations,
+		getExtensionSettingValue,
 		setExtensionSettingValue,
 	};
 	const session: {
@@ -155,6 +166,7 @@ function createFixture(firstMode: { mode: string } = { mode: "careful" }) {
 		fakeThis,
 		runner,
 		selector: selector!,
+		getExtensionSettingValue,
 		setExtensionSettingValue,
 		showError,
 		failWrites(error: Error) {
@@ -198,8 +210,25 @@ describe("InteractiveMode extension settings selector", () => {
 		expect(getItems(fixture.selector).at(-2)?.currentValue).toBe("Quick");
 	});
 
+	it("keeps a valid project override visually effective after a global selector write", () => {
+		const fixture = createFixture({
+			globalFirstMode: { mode: "quick" },
+			projectFirstMode: { mode: "careful" },
+		});
+		const item = getItems(fixture.selector).find((candidate) => candidate.id === "extension-setting:first.mode");
+		expect(item?.currentValue).toBe("Careful");
+
+		const list = fixture.selector.getSettingsList();
+		list.selectItem("extension-setting:first.mode");
+		list.handleInput("\r");
+
+		expect(fixture.setExtensionSettingValue).toHaveBeenCalledWith("first.mode", { mode: "quick" });
+		expect(fixture.getExtensionSettingValue).toHaveBeenLastCalledWith("first.mode");
+		expect(item?.currentValue).toBe("Careful");
+	});
+
 	it("shows a valid value outside the choices as custom and cycles it to the first choice", () => {
-		const fixture = createFixture({ mode: "outside-current-choices" });
+		const fixture = createFixture({ globalFirstMode: { mode: "outside-current-choices" } });
 		const item = getItems(fixture.selector).find((candidate) => candidate.id === "extension-setting:first.mode");
 		expect(item?.currentValue).toBe("(custom)");
 
@@ -231,6 +260,7 @@ describe("InteractiveMode extension settings selector", () => {
 		const replacementWrite = vi.fn();
 		fixture.fakeThis.session.extensionRunner = {
 			getRegisteredSettings: () => registrations,
+			getExtensionSettingValue: vi.fn(),
 			setExtensionSettingValue: replacementWrite,
 		};
 		const list = fixture.selector.getSettingsList();
