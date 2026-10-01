@@ -84,7 +84,7 @@ Stored values must be strict JSON and must satisfy the registered TypeBox schema
 
 `onChange()` receives the new effective value. A listener runs only when a write changes that effective value, not merely when a lower-precedence layer changes. Unsubscribe listeners during `session_shutdown`; reload also invalidates the old runtime's subscriptions.
 
-`pi.getSettings()` remains a snapshot of core settings. It omits the raw `extensionSettings` map. That map is not a public extension API: an extension can read or mutate its own values only through its handles, and cannot use another extension's handle or key.
+`pi.getSettings()` remains a snapshot of core settings. It omits the raw `extensionSettings` map. That map is not a public extension API. Handles are capabilities: a handle grants access to the registered setting it captures, while there is no public lookup API for another extension's handle or arbitrary-key access path. Registry operations enforce the captured registration owner.
 
 The checked [`extension-setting.ts`](../examples/extensions/extension-setting.ts) example registers a literal-union setting during factory load, subscribes after `session_start`, uses global and project writes from a command, and unsubscribes during `session_shutdown`.
 
