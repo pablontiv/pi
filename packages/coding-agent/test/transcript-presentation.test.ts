@@ -93,6 +93,14 @@ describe("transcript presentation policies", () => {
 		});
 	});
 
+	it("propagates policy errors for registration-level isolation", () => {
+		const failingPolicy: TranscriptPresentationPolicy = () => {
+			throw new Error("policy failed");
+		};
+
+		expect(() => applyTranscriptPresentationPolicies(block, [failingPolicy])).toThrow("policy failed");
+	});
+
 	it("preserves the stable orphaned-thinking-placeholder subtype", () => {
 		const orphanedThinkingBlock: TranscriptBlockDescriptor = {
 			kind: "thinking",
