@@ -117,6 +117,9 @@ export type {
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
+/** Settings visible to extensions. Raw extension-owned values are accessed through typed handles. */
+export type ExtensionAPISettings = Omit<Settings, "extensionSettings">;
+
 // ============================================================================
 // UI Context
 // ============================================================================
@@ -1729,8 +1732,8 @@ export interface ExtensionAPI {
 	/** Get all configured tools with parameter schema, prompt guidelines, exposure, and source metadata. */
 	getAllTools(): ToolInfo[];
 
-	/** Get a copy of the effective settings (global and project settings merged, with overrides). */
-	getSettings(): Settings;
+	/** Get a copy of the effective settings, excluding raw extension-owned values. */
+	getSettings(): ExtensionAPISettings;
 
 	/**
 	 * Set the active tools by name. Unknown and `hidden` tools are ignored. Tools with `codemode` or

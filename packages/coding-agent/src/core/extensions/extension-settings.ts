@@ -1,6 +1,7 @@
 import { copyJson } from "@earendil-works/chord";
 import type { Static, TSchema } from "typebox";
 import { Check, Clone, Equal } from "typebox/value";
+import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { SettingsScope } from "../settings-manager.ts";
 import type { SourceInfo } from "../source-info.ts";
 
@@ -34,6 +35,204 @@ export interface ExtensionSettingHandle<T> {
 export interface RegisteredExtensionSetting {
 	readonly definition: ExtensionSettingDefinition<TSchema>;
 	readonly sourceInfo: SourceInfo;
+}
+
+export interface ExtensionSettingsActions {
+	getExtensionSettingLayers(key: string): { global: unknown; project: unknown };
+	setExtensionSetting(key: string, value: unknown, scope: SettingsScope): void;
+}
+
+export interface ExtensionSettingRegistrationSource {
+	readonly extensionPath: string;
+	readonly registration: RegisteredExtensionSetting;
+}
+
+export interface ExtensionSettingRuntimeError {
+	readonly extensionPath: string;
+	readonly event: "extension_setting";
+	readonly error: string;
+}
+
+/** Runtime registry for extension-owned settings. It contains no presentation components. */
+export class ExtensionSettingsRegistry {
+	private readonly registrations = new Map<string, ExtensionSettingRegistrationSource>();
+	private readonly descriptors: readonly RegisteredExtensionSetting[];
+	private readonly diagnostics: ResourceDiagnostic[] = [];
+	private readonly reportedDiagnostics = new Set<string>();
+	private readonly listeners = new Map<string, Set<(value: unknown) => void>>();
+	private readonly actions: ExtensionSettingsActions;
+	private readonly reportError: (error: ExtensionSettingRuntimeError) => void;
+
+	constructor(
+		sources: readonly {
+			readonly path: string;
+			readonly settings?: ReadonlyMap<string, RegisteredExtensionSetting>;
+		}[],
+		actions: ExtensionSettingsActions,
+		reportError: (error: ExtensionSettingRuntimeError) => void,
+	) {
+		this.actions = actions;
+		this.reportError = reportError;
+		for (const source of sources) {
+			for (const [key, registration] of source.settings ?? []) {
+				const winner = this.registrations.get(key);
+				if (winner !== undefined) {
+					this.addDiagnostic(
+						`collision:${key}:${source.path}`,
+						source.path,
+						`Extension setting "${key}" is registered by both "${winner.extensionPath}" and "${source.path}". Using "${winner.extensionPath}".`,
+					);
+					continue;
+				}
+				const sourceInfo = Object.freeze({ ...registration.sourceInfo });
+				this.registrations.set(key, {
+					extensionPath: source.path,
+					registration: Object.freeze({ definition: registration.definition, sourceInfo }),
+				});
+			}
+		}
+		this.descriptors = Object.freeze(Array.from(this.registrations.values(), ({ registration }) => registration));
+
+		// Validate at construction so diagnostics are deterministic even when no handle calls get().
+		for (const entry of this.registrations.values()) this.resolve(entry);
+	}
+
+	getRegisteredSettings(): readonly RegisteredExtensionSetting[] {
+		return this.descriptors;
+	}
+
+	getDiagnostics(): readonly ResourceDiagnostic[] {
+		return Object.freeze(this.diagnostics.slice());
+	}
+
+	get(extensionPath: string, key: string): unknown {
+		const entry = this.requireOwner(extensionPath, key);
+		return copySettingValue(key, "value", this.resolve(entry));
+	}
+
+	set(extensionPath: string, key: string, value: unknown, scope: SettingsScope): void {
+		const entry = this.requireOwner(extensionPath, key);
+		if (scope !== "global" && scope !== "project") {
+			throw new Error(`Invalid scope for extension setting "${key}": ${String(scope)}`);
+		}
+		const copiedValue = copySettingValue(key, "value", value);
+		if (!checkSettingValue(key, entry.registration.definition.schema, copiedValue)) {
+			throw new Error(`Extension setting "${key}" value does not satisfy its schema.`);
+		}
+
+		const previous = this.resolve(entry);
+		this.actions.setExtensionSetting(key, copiedValue, scope);
+		const next = this.resolve(entry);
+		if (Equal(previous, next)) return;
+
+		for (const listener of this.listeners.get(key) ?? []) {
+			try {
+				listener(copySettingValue(key, "value", next));
+			} catch (error) {
+				this.reportError({
+					extensionPath,
+					event: "extension_setting",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
+	onChange(extensionPath: string, key: string, listener: (value: unknown) => void): () => void {
+		this.requireOwner(extensionPath, key);
+		const listeners = this.listeners.get(key) ?? new Set<(value: unknown) => void>();
+		listeners.add(listener);
+		this.listeners.set(key, listeners);
+		let active = true;
+		return () => {
+			if (!active) return;
+			active = false;
+			listeners.delete(listener);
+			if (listeners.size === 0) this.listeners.delete(key);
+		};
+	}
+
+	setValue(key: string, value: unknown): void {
+		const entry = this.registrations.get(key);
+		if (entry === undefined) throw new Error(`Extension setting "${key}" is not registered.`);
+		this.set(entry.extensionPath, key, value, "global");
+	}
+
+	clearListeners(): void {
+		this.listeners.clear();
+	}
+
+	private requireOwner(extensionPath: string, key: string): ExtensionSettingRegistrationSource {
+		const entry = this.registrations.get(key);
+		if (entry === undefined) throw new Error(`Extension setting "${key}" is not registered.`);
+		if (entry.extensionPath !== extensionPath) {
+			throw new Error(
+				`Extension setting "${key}" is owned by "${entry.extensionPath}"; "${extensionPath}" cannot access it.`,
+			);
+		}
+		return entry;
+	}
+
+	private resolve(entry: ExtensionSettingRegistrationSource): unknown {
+		const { definition } = entry.registration;
+		let layers: { global: unknown; project: unknown };
+		try {
+			layers = this.actions.getExtensionSettingLayers(definition.key);
+		} catch (error) {
+			this.addDiagnostic(
+				`read:${definition.key}`,
+				entry.extensionPath,
+				`Could not read stored extension setting "${definition.key}": ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return copySettingValue(definition.key, "defaultValue", definition.defaultValue);
+		}
+		const project = this.validateLayer(entry, "project", layers.project);
+		const global = this.validateLayer(entry, "global", layers.global);
+		if (project.valid) return project.value;
+		if (global.valid) return global.value;
+		return copySettingValue(definition.key, "defaultValue", definition.defaultValue);
+	}
+
+	private validateLayer(
+		entry: ExtensionSettingRegistrationSource,
+		layer: SettingsScope,
+		value: unknown,
+	): { valid: false } | { valid: true; value: unknown } {
+		if (value === undefined) return { valid: false };
+		const { definition } = entry.registration;
+		let copiedValue: unknown;
+		try {
+			copiedValue = copySettingValue(definition.key, `${layer} value`, value);
+		} catch (error) {
+			this.addInvalidLayerDiagnostic(entry, layer, error instanceof Error ? error.message : String(error));
+			return { valid: false };
+		}
+		if (!checkSettingValue(definition.key, definition.schema, copiedValue)) {
+			this.addInvalidLayerDiagnostic(entry, layer, "value does not satisfy its schema");
+			return { valid: false };
+		}
+		return { valid: true, value: copiedValue };
+	}
+
+	private addInvalidLayerDiagnostic(
+		entry: ExtensionSettingRegistrationSource,
+		layer: SettingsScope,
+		reason: string,
+	): void {
+		const key = entry.registration.definition.key;
+		this.addDiagnostic(
+			`invalid:${key}:${layer}`,
+			entry.extensionPath,
+			`Ignoring invalid ${layer} value for extension setting "${key}": ${reason}.`,
+		);
+	}
+
+	private addDiagnostic(id: string, extensionPath: string, message: string): void {
+		if (this.reportedDiagnostics.has(id)) return;
+		this.reportedDiagnostics.add(id);
+		this.diagnostics.push(Object.freeze({ type: "warning", message, path: extensionPath }));
+		this.reportError({ extensionPath, event: "extension_setting", error: message });
+	}
 }
 
 /** Return whether a setting key is flat, namespaced, lowercase, and safe for object-backed storage. */

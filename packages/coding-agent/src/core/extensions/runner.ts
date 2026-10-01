@@ -25,6 +25,11 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
+import {
+	type ExtensionSettingRuntimeError,
+	type ExtensionSettingsActions,
+	ExtensionSettingsRegistry,
+} from "./extension-settings.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -387,6 +392,8 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
+	private readonly settingRegistry: ExtensionSettingsRegistry;
+	private pendingSettingErrors: ExtensionSettingRuntimeError[] = [];
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
@@ -397,6 +404,12 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
+		settingActions: ExtensionSettingsActions = {
+			getExtensionSettingLayers: () => ({ global: undefined, project: undefined }),
+			setExtensionSetting: () => {
+				throw new Error("Extension settings are not bound to persistent storage.");
+			},
+		},
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -404,6 +417,14 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.settingRegistry = new ExtensionSettingsRegistry(extensions, settingActions, (error) =>
+			this.reportSettingError(error),
+		);
+		this.runtime.getExtensionSetting = (extensionPath, key) => this.settingRegistry.get(extensionPath, key);
+		this.runtime.setExtensionSetting = (extensionPath, key, value, scope) =>
+			this.settingRegistry.set(extensionPath, key, value, scope);
+		this.runtime.onExtensionSettingChange = (extensionPath, key, listener) =>
+			this.settingRegistry.onChange(extensionPath, key, listener);
 	}
 
 	bindCore(
@@ -426,7 +447,10 @@ export class ExtensionRunner {
 		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
-		this.runtime.getSettings = actions.getSettings;
+		this.runtime.getSettings = () => {
+			const { extensionSettings: _extensionSettings, ...settings } = actions.getSettings();
+			return settings;
+		};
 		this.runtime.setActiveTools = actions.setActiveTools;
 		this.runtime.refreshTools = actions.refreshTools;
 		this.runtime.getCommands = actions.getCommands;
@@ -625,6 +649,19 @@ export class ExtensionRunner {
 		return this.extensions.map((e) => e.path);
 	}
 
+	getRegisteredSettings() {
+		return this.settingRegistry.getRegisteredSettings();
+	}
+
+	getSettingDiagnostics(): readonly ResourceDiagnostic[] {
+		return this.settingRegistry.getDiagnostics();
+	}
+
+	setExtensionSettingValue(key: string, value: unknown): void {
+		this.assertActive();
+		this.settingRegistry.setValue(key, value);
+	}
+
 	/** Get all registered tools from all extensions (first registration per name wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
@@ -724,6 +761,7 @@ export class ExtensionRunner {
 		if (!this.staleMessage) {
 			this.staleMessage = message;
 			this.runtime.invalidate(message);
+			this.settingRegistry.clearListeners();
 		}
 	}
 
@@ -735,7 +773,20 @@ export class ExtensionRunner {
 
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
+		if (this.pendingSettingErrors.length > 0) {
+			const pending = this.pendingSettingErrors;
+			this.pendingSettingErrors = [];
+			for (const error of pending) this.emitError(error);
+		}
 		return () => this.errorListeners.delete(listener);
+	}
+
+	private reportSettingError(error: ExtensionSettingRuntimeError): void {
+		if (this.errorListeners.size === 0) {
+			this.pendingSettingErrors.push(error);
+			return;
+		}
+		this.emitError(error);
 	}
 
 	emitError(error: ExtensionError): void {
