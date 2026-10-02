@@ -18,7 +18,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createHarnessWithExtensions, type Harness } from "./test-harness.ts";
 
-function normalized(container: Container, width = 100): string {
+function normalized(container: Component, width = 100): string {
 	return container
 		.render(width)
 		.join("\n")
@@ -85,6 +85,140 @@ describe("interactive transcript presentation integration", () => {
 	beforeAll(() => initTheme("dark"));
 	afterEach(() => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	it("hides a live cache-miss notice as one unit and restores the existing unit through invalidation", async () => {
+		let density: TranscriptDensity = "hidden";
+		let invalidatePolicy = () => {};
+		const noticeDescriptors: TranscriptBlockDescriptor[] = [];
+		const harness = await createHarnessWithExtensions({
+			settings: { showCacheMissNotices: true },
+			responses: [
+				{
+					text: "LIVE_NOTICE_RESPONSE",
+					usage: {
+						input: 60_000,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 60_010,
+						cost: { input: 0.3, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+					},
+				},
+			],
+			extensionFactories: [
+				{
+					path: "<notice-presentation-policy>",
+					factory: (pi) => {
+						const registration = pi.registerTranscriptPresentationPolicy((block) => {
+							if (block.kind !== "notice") return undefined;
+							noticeDescriptors.push({ ...block, capabilities: { ...block.capabilities } });
+							return { density };
+						});
+						invalidatePolicy = () => registration.invalidate();
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "prior cached response" }],
+			api: "anthropic-messages",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 0,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 60_000,
+				totalTokens: 60_010,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0.4, total: 0.4 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now() - 1_000,
+		});
+		await harness.session.bindExtensions({});
+		const mode = createInteractive(harness);
+		mode.subscribeToAgent();
+		const componentsBeforePrompt = new Set(mode.presentedComponents.keys());
+
+		await harness.session.prompt("trigger a cache miss");
+
+		expect(normalized(mode.chatContainer)).toContain("LIVE_NOTICE_RESPONSE");
+		expect(normalized(mode.chatContainer)).not.toContain("Cache miss");
+		const noticeUnit = [...mode.presentedComponents.keys()].find(
+			(component) =>
+				!componentsBeforePrompt.has(component) &&
+				normalized(component).includes("Cache miss: 60k tokens re-billed (~$0.30)"),
+		);
+		expect(noticeUnit).toBeDefined();
+		if (!noticeUnit) throw new Error("Expected a presented live notice unit");
+		const noticePresentation = mode.presentedComponents.get(noticeUnit);
+		expect(noticePresentation).toBeDefined();
+		expect(mode.chatContainer.render(100).at(-1)).not.toBe("");
+		expect(noticeDescriptors).toContainEqual({
+			kind: "notice",
+			capabilities: { summary: false, expandable: false },
+		});
+
+		density = "full";
+		invalidatePolicy();
+		expect(mode.presentedComponents.get(noticeUnit)).toBe(noticePresentation);
+		const full = normalized(mode.chatContainer);
+		expect(full).toContain("LIVE_NOTICE_RESPONSE\n\n Cache miss: 60k tokens re-billed (~$0.30)");
+	});
+
+	it("hides a reconstructed cache-warming notice without a spacer and restores its existing unit", async () => {
+		let density: TranscriptDensity = "hidden";
+		let invalidatePolicy = () => {};
+		const harness = await createHarnessWithExtensions({
+			settings: { showCacheMissNotices: true },
+			extensionFactories: [
+				{
+					path: "<historical-notice-presentation-policy>",
+					factory: (pi) => {
+						const registration = pi.registerTranscriptPresentationPolicy((block) =>
+							block.kind === "notice" ? { density } : undefined,
+						);
+						invalidatePolicy = () => registration.invalidate();
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.sessionManager.appendUsage(
+			"cache_warm",
+			"faux",
+			"faux-1",
+			{
+				input: 10,
+				output: 20,
+				cacheRead: 30,
+				cacheWrite: 40,
+				totalTokens: 100,
+				cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.065, total: 0.125 },
+			},
+			"history",
+		);
+		await harness.session.bindExtensions({});
+		const mode = createInteractive(harness);
+
+		mode.rebuildChatFromMessages();
+
+		expect(mode.chatContainer.render(100)).toEqual([]);
+		const noticeUnit = [...mode.presentedComponents.keys()].find((component) =>
+			normalized(component).includes("Cache warmed (history): $0.125"),
+		);
+		expect(noticeUnit).toBeDefined();
+		if (!noticeUnit) throw new Error("Expected a presented historical notice unit");
+		const noticePresentation = mode.presentedComponents.get(noticeUnit);
+
+		density = "full";
+		invalidatePolicy();
+		expect(mode.presentedComponents.get(noticeUnit)).toBe(noticePresentation);
+		expect(normalized(mode.chatContainer)).toBe("Cache warmed (history): $0.125");
+		expect(mode.chatContainer.render(100)).toHaveLength(2);
 	});
 
 	it("keeps one live tool target through pending, partial, hidden, summary, and final states, then reconstructs the same presentation", async () => {
