@@ -21,6 +21,14 @@ export type {
 } from "./runner.ts";
 export { ExtensionRunner } from "./runner.ts";
 export type {
+	TranscriptBlockDescriptor,
+	TranscriptBlockKind,
+	TranscriptBlockSubtype,
+	TranscriptDensity,
+	TranscriptPresentation,
+	TranscriptPresentationPolicy,
+} from "./transcript-presentation.ts";
+export type {
 	AfterProviderResponseEvent,
 	AgentActivityOutcome,
 	AgentBeforeSettleEvent,
@@ -194,6 +202,7 @@ export type {
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
+	TranscriptPresentationPolicyRegistration,
 	TreePreparation,
 	TurnEndEvent,
 	TurnEndEventResult,

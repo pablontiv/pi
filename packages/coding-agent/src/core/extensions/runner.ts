@@ -30,6 +30,11 @@ import {
 	type ExtensionSettingsActions,
 	ExtensionSettingsRegistry,
 } from "./extension-settings.ts";
+import {
+	applyTranscriptPresentationPolicies,
+	type TranscriptBlockDescriptor,
+	type TranscriptPresentation,
+} from "./transcript-presentation.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -75,6 +80,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	RegisteredTool,
+	RegisteredTranscriptPresentationPolicy,
 	ReplacedSessionContext,
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
@@ -218,6 +224,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+export type TranscriptPresentationInvalidationListener = () => void;
 
 type BoundaryBaseEvent =
 	| Omit<TurnEndEvent, "entries" | "continue" | "context">
@@ -367,6 +374,11 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private transcriptPresentationInvalidationListeners = new Set<TranscriptPresentationInvalidationListener>();
+	private disabledTranscriptPresentationPolicies = new Set<RegisteredTranscriptPresentationPolicy>();
+	private readonly notifyTranscriptPresentationInvalidated = () => {
+		for (const listener of this.transcriptPresentationInvalidationListeners) listener();
+	};
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -425,6 +437,7 @@ export class ExtensionRunner {
 			this.settingRegistry.set(extensionPath, key, value, scope);
 		this.runtime.onExtensionSettingChange = (extensionPath, key, listener) =>
 			this.settingRegistry.onChange(extensionPath, key, listener);
+		this.runtime.invalidateTranscriptPresentation = this.notifyTranscriptPresentationInvalidated;
 	}
 
 	bindCore(
@@ -765,6 +778,10 @@ export class ExtensionRunner {
 	): void {
 		if (!this.staleMessage) {
 			this.staleMessage = message;
+			this.transcriptPresentationInvalidationListeners.clear();
+			if (this.runtime.invalidateTranscriptPresentation === this.notifyTranscriptPresentationInvalidated) {
+				this.runtime.invalidateTranscriptPresentation = () => {};
+			}
 			this.runtime.invalidate(message);
 			this.settingRegistry.clearListeners();
 		}
@@ -774,6 +791,11 @@ export class ExtensionRunner {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);
 		}
+	}
+
+	onTranscriptPresentationInvalidated(listener: TranscriptPresentationInvalidationListener): () => void {
+		this.transcriptPresentationInvalidationListeners.add(listener);
+		return () => this.transcriptPresentationInvalidationListeners.delete(listener);
 	}
 
 	onError(listener: ExtensionErrorListener): () => void {
@@ -825,6 +847,29 @@ export class ExtensionRunner {
 			}
 		}
 		return false;
+	}
+
+	resolveTranscriptPresentation(block: TranscriptBlockDescriptor): TranscriptPresentation {
+		this.assertActive();
+		let current = applyTranscriptPresentationPolicies(block, []);
+		for (const extension of this.extensions) {
+			for (const registration of extension.transcriptPresentationPolicies ?? []) {
+				if (this.disabledTranscriptPresentationPolicies.has(registration)) continue;
+				try {
+					const preceding = current;
+					current = applyTranscriptPresentationPolicies(block, [() => preceding, registration.policy]);
+				} catch (error) {
+					this.disabledTranscriptPresentationPolicies.add(registration);
+					this.emitError({
+						extensionPath: extension.path,
+						event: "transcript_presentation",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+		return current;
 	}
 
 	getMessageRenderer(customType: string): MessageRenderer | undefined {

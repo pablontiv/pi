@@ -12,6 +12,37 @@ import {
 	loadExtensionFromFactory,
 } from "../src/core/extensions/loader.ts";
 import type { ExtensionAPI, ExtensionSettingDefinition } from "../src/core/extensions/types.ts";
+import type {
+	TranscriptBlockDescriptor,
+	TranscriptBlockKind,
+	TranscriptBlockSubtype,
+	TranscriptDensity,
+	TranscriptPresentation,
+	TranscriptPresentationPolicy,
+	TranscriptPresentationPolicyRegistration,
+} from "../src/index.ts";
+
+const publicTranscriptPresentationTypes: {
+	kind: TranscriptBlockKind;
+	subtype: TranscriptBlockSubtype;
+	density: TranscriptDensity;
+	descriptor: TranscriptBlockDescriptor;
+	presentation: TranscriptPresentation;
+	policy: TranscriptPresentationPolicy;
+	registration: TranscriptPresentationPolicyRegistration;
+} = {
+	kind: "notice",
+	subtype: "orphaned-thinking-placeholder",
+	density: "full",
+	descriptor: {
+		kind: "notice",
+		capabilities: { summary: false, expandable: false },
+	},
+	presentation: { density: "full" },
+	policy: () => undefined,
+	registration: { invalidate: () => {}, dispose: () => {} },
+};
+void publicTranscriptPresentationTypes;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -414,6 +445,26 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
+	it("loads the generic transcript presentation policy example", async () => {
+		const examplePath = path.resolve(__dirname, "../examples/extensions/transcript-presentation.ts");
+		const result = await discoverAndLoadExtensions([examplePath], tempDir, tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].transcriptPresentationPolicies).toHaveLength(1);
+
+		const policy = result.extensions[0].transcriptPresentationPolicies?.[0]?.policy;
+		expect(
+			policy?.({ kind: "notice", capabilities: { summary: true, expandable: false } }, { density: "full" }),
+		).toEqual({ density: "hidden" });
+		expect(
+			policy?.({ kind: "custom-entry", capabilities: { summary: true, expandable: false } }, { density: "full" }),
+		).toEqual({ density: "summary" });
+		expect(
+			policy?.({ kind: "custom-entry", capabilities: { summary: false, expandable: false } }, { density: "full" }),
+		).toBeUndefined();
+	});
+
 	it("registers message and entry renderers", async () => {
 		const extCode = `
 			export default function(pi) {
@@ -437,6 +488,51 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].markdownTransformer).toBeDefined();
 		expect(result.extensions[0].messageRenderers.has("my-custom-type")).toBe(true);
 		expect(result.extensions[0].entryRenderers?.has("my-entry-type")).toBe(true);
+	});
+
+	it("stores transcript presentation policies in extension and registration order", async () => {
+		const firstPath = path.join(tempDir, "first.ts");
+		const secondPath = path.join(tempDir, "second.ts");
+		fs.writeFileSync(
+			firstPath,
+			`
+				export default function(pi) {
+					pi.registerTranscriptPresentationPolicy(function firstFull() {
+						return { density: "full" };
+					});
+					pi.registerTranscriptPresentationPolicy(function firstSummary() {
+						return { density: "summary" };
+					});
+				}
+			`,
+		);
+		fs.writeFileSync(
+			secondPath,
+			`
+				export default function(pi) {
+					pi.registerTranscriptPresentationPolicy(function secondHidden() {
+						return { density: "hidden" };
+					});
+				}
+			`,
+		);
+
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		const result = await loadExtensions([secondPath, firstPath], tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(
+			result.extensions.flatMap((extension) =>
+				(extension.transcriptPresentationPolicies ?? []).map((registration) => ({
+					name: registration.policy.name,
+					sourcePath: registration.sourceInfo.path,
+				})),
+			),
+		).toEqual([
+			{ name: "secondHidden", sourcePath: secondPath },
+			{ name: "firstFull", sourcePath: firstPath },
+			{ name: "firstSummary", sourcePath: firstPath },
+		]);
 	});
 
 	it("reports error when extension throws during initialization", async () => {

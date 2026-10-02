@@ -2,6 +2,10 @@ import type { Component, Terminal, TUI, WheelScrollLines } from "@earendil-works
 import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type {
+	TranscriptBlockDescriptor,
+	TranscriptPresentation,
+} from "../src/core/extensions/transcript-presentation.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
 import {
@@ -12,6 +16,7 @@ import {
 	type StatusIndicatorKind,
 	WorkingStatusIndicator,
 } from "../src/modes/interactive/components/status-indicator.ts";
+import { TranscriptPresentationComponent } from "../src/modes/interactive/components/transcript-presentation.ts";
 import {
 	createInteractiveTui,
 	createInteractiveTuiReference,
@@ -178,6 +183,78 @@ describe("createInteractiveTui", () => {
 
 		expect(stableUi.mode).toBe("fullscreen");
 		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
+	});
+});
+
+describe("InteractiveMode transcript presentation runner binding", () => {
+	const descriptor: TranscriptBlockDescriptor = {
+		id: "tool-1",
+		kind: "tool",
+		toolName: "read",
+		state: "success",
+		capabilities: { summary: true, expandable: true },
+	};
+
+	function createRunner(density: TranscriptPresentation["density"]) {
+		let listener: (() => void) | undefined;
+		const unsubscribe = vi.fn(() => {
+			listener = undefined;
+		});
+		return {
+			resolveTranscriptPresentation: vi.fn((_block: TranscriptBlockDescriptor) => ({ density })),
+			onTranscriptPresentationInvalidated: vi.fn((nextListener: () => void) => {
+				listener = nextListener;
+				return unsubscribe;
+			}),
+			invalidate: () => listener?.(),
+			unsubscribe,
+		};
+	}
+
+	it("keeps mounted components on the current replacement runner and rebinds invalidation idempotently", () => {
+		const oldRunner = createRunner("hidden");
+		const replacementRunner = createRunner("summary");
+		const session = { extensionRunner: oldRunner };
+		const chatContainer = new Container();
+		const ui = { requestRender: vi.fn() };
+		const context = {
+			runtimeHost: { session },
+			session,
+			chatContainer,
+			ui,
+			transcriptPresentationInvalidationUnsubscribe: undefined as (() => void) | undefined,
+		};
+		const prototype = InteractiveMode.prototype as unknown as {
+			resolveTranscriptPresentation(
+				this: typeof context,
+				block: Readonly<TranscriptBlockDescriptor>,
+			): TranscriptPresentation;
+			bindTranscriptPresentationInvalidation(this: typeof context): void;
+		};
+		const child = { render: () => ["full"], invalidate: vi.fn() };
+		const mounted = new TranscriptPresentationComponent({
+			component: child,
+			descriptor: () => descriptor,
+			resolve: (block) => prototype.resolveTranscriptPresentation.call(context, block),
+			renderSummary: () => ["summary"],
+		});
+		chatContainer.addChild(mounted);
+
+		prototype.bindTranscriptPresentationInvalidation.call(context);
+		expect(mounted.render(80)).toEqual([]);
+		session.extensionRunner = replacementRunner;
+		prototype.bindTranscriptPresentationInvalidation.call(context);
+
+		expect(oldRunner.unsubscribe).toHaveBeenCalledOnce();
+		expect(mounted.render(80)).toEqual(["summary"]);
+		expect(oldRunner.resolveTranscriptPresentation).toHaveBeenCalledOnce();
+		expect(replacementRunner.resolveTranscriptPresentation).toHaveBeenCalledOnce();
+
+		oldRunner.invalidate();
+		expect(child.invalidate).not.toHaveBeenCalled();
+		replacementRunner.invalidate();
+		expect(child.invalidate).toHaveBeenCalledOnce();
+		expect(ui.requestRender).toHaveBeenCalledOnce();
 	});
 });
 

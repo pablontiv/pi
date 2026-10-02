@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import {
@@ -3796,7 +3797,12 @@ export class AgentSession {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
+		options?: {
+			excludeFromContext?: boolean;
+			id?: string;
+			operations?: BashOperations;
+			onMessageRecorded?: (message: Readonly<BashExecutionMessage>) => void;
+		},
 	): Promise<BashResult> {
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
@@ -3820,7 +3826,12 @@ export class AgentSession {
 				},
 			);
 
-			this.recordBashResult(command, result, options);
+			const bashMessage = this.recordBashResult(command, result, options);
+			try {
+				options?.onMessageRecorded?.(bashMessage);
+			} catch {
+				// Recording has already succeeded; presentation notification failures must not change execution success.
+			}
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
@@ -3831,9 +3842,14 @@ export class AgentSession {
 	 * Record a bash execution result in session history.
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
-	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+	recordBashResult(
+		command: string,
+		result: BashResult,
+		options?: { excludeFromContext?: boolean },
+	): Readonly<BashExecutionMessage> {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
+			id: randomUUID(),
 			command,
 			output: result.output,
 			exitCode: result.exitCode,
@@ -3852,6 +3868,7 @@ export class AgentSession {
 			this.sessionManager.appendMessage(bashMessage);
 			this._refreshFinalizedContext();
 		}
+		return bashMessage;
 	}
 
 	/**

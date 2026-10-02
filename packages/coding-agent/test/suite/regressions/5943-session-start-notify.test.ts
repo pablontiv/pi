@@ -43,6 +43,7 @@ type RebindContext = {
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
+	bindTranscriptPresentationInvalidation: () => void;
 	subscribeToAgent: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
@@ -82,6 +83,7 @@ type ReloadCommandContext = {
 	defaultEditor: { setPaddingX: (padding: number) => void; setAutocompleteMaxVisible: (maxVisible: number) => void };
 	themeController: { applyFromSettings: () => Promise<void> };
 	resetExtensionUI: () => void;
+	bindTranscriptPresentationInvalidation: () => void;
 	rebuildChatFromMessages: () => void;
 	setupAutocompleteProvider: () => void;
 	setupExtensionShortcuts: (runner: unknown) => void;
@@ -156,6 +158,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		customHeader: overrides.customHeader,
 		builtInHeader: overrides.builtInHeader,
 		resetExtensionUI: overrides.resetExtensionUI ?? (() => {}),
+		bindTranscriptPresentationInvalidation: overrides.bindTranscriptPresentationInvalidation ?? (() => {}),
 		rebuildChatFromMessages: overrides.rebuildChatFromMessages ?? (() => {}),
 		setupAutocompleteProvider: overrides.setupAutocompleteProvider ?? (() => {}),
 		setupExtensionShortcuts: overrides.setupExtensionShortcuts ?? (() => {}),
@@ -260,6 +263,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
+				bindTranscriptPresentationInvalidation: () => {},
 				subscribeToAgent: () => events.push("subscribe"),
 				updateAvailableProviderCount: async () => {},
 				updateEditorBorderColor: () => {},
@@ -301,6 +305,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
+				bindTranscriptPresentationInvalidation: () => {},
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {
@@ -353,6 +358,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
+				bindTranscriptPresentationInvalidation: () => {},
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {
