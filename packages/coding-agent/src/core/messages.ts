@@ -28,6 +28,8 @@ export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
  */
 export interface BashExecutionMessage {
 	role: "bashExecution";
+	/** Persisted identity for exact UI reconciliation. Absent on legacy messages. */
+	id?: string;
 	command: string;
 	output: string;
 	exitCode: number | undefined;
