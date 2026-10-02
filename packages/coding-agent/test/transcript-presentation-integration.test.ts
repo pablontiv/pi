@@ -11,6 +11,7 @@ import type {
 	TranscriptPresentation,
 } from "../src/core/extensions/transcript-presentation.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
+import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -43,7 +44,6 @@ type InteractiveInternals = {
 	presentedComponents: Map<Component, Component>;
 	subscribeToAgent(): void;
 	bindTranscriptPresentationInvalidation(): void;
-	clearChatContainer(): void;
 	rebuildChatFromMessages(): void;
 	setToolsExpanded(expanded: boolean): void;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
@@ -271,11 +271,11 @@ describe("interactive transcript presentation integration", () => {
 		expect(historical).toContain("LOCAL_BASH_OUTPUT");
 	});
 
-	it("retains and moves the exact pending bash wrapper across a chat rebuild", async () => {
+	it("reconciles the exact persisted pending bash wrapper across a historical rebuild and flush", async () => {
 		let density: TranscriptDensity = "hidden";
 		let invalidatePolicy = () => {};
 		const harness = await createHarnessWithExtensions({
-			responses: [{ text: "streaming", delayMs: 50 }],
+			responses: [{ text: "ASSISTANT_STREAM_FINISHED", delayMs: 50 }],
 			extensionFactories: [
 				{
 					path: "<pending-bash-presentation-policy>",
@@ -284,9 +284,12 @@ describe("interactive transcript presentation integration", () => {
 							block.kind === "bash" ? { density } : undefined,
 						);
 						invalidatePolicy = () => registration.invalidate();
-						pi.on("user_bash", async () => ({
+						pi.on("user_bash", async (event) => ({
 							result: {
-								output: "RETAINED_PENDING_BASH_OUTPUT",
+								output:
+									event.command === "ordinary"
+										? "ORDINARY_HISTORICAL_BASH_OUTPUT"
+										: "RETAINED_PENDING_BASH_OUTPUT",
 								exitCode: 0,
 								cancelled: false,
 								truncated: false,
@@ -301,6 +304,7 @@ describe("interactive transcript presentation integration", () => {
 		const mode = createInteractive(harness);
 		mode.subscribeToAgent();
 
+		await mode.handleBashCommand("ordinary");
 		const prompt = harness.session.prompt("keep the session streaming");
 		await waitUntil(() => harness.session.isStreaming);
 		await mode.handleBashCommand("retained");
@@ -310,24 +314,53 @@ describe("interactive transcript presentation integration", () => {
 		if (!pendingWrapper) throw new Error("Expected a pending bash presentation wrapper");
 		expect(mode.pendingMessagesContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
 
-		mode.clearChatContainer();
+		await prompt;
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "bashExecution" &&
+						entry.message.command === "retained",
+				),
+		).toBe(true);
+
+		// Exercise the production rebuild shape: clear chat and reconstruct persisted session items.
+		mode.rebuildChatFromMessages();
 		expect(mode.pendingBashComponents).toEqual([pendingBash]);
 		expect(mode.presentedComponents.get(pendingBash)).toBe(pendingWrapper);
-		expect(mode.pendingMessagesContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+		expect(mode.pendingMessagesContainer.children).not.toContain(pendingWrapper);
+		expect(mode.chatContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
 
 		mode.flushPendingBashComponents();
 		expect(mode.pendingBashComponents).toEqual([]);
 		expect(mode.presentedComponents.get(pendingBash)).toBe(pendingWrapper);
 		expect(mode.pendingMessagesContainer.children).not.toContain(pendingWrapper);
 		expect(mode.chatContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+		expect(
+			[...mode.presentedComponents.keys()].filter(
+				(component) => component instanceof BashExecutionComponent && component.getCommand() === "retained",
+			),
+		).toEqual([pendingBash]);
 		expect(normalized(mode.chatContainer)).not.toContain("RETAINED_PENDING_BASH_OUTPUT");
 
 		mode.flushPendingBashComponents();
 		expect(mode.chatContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
 		density = "full";
 		invalidatePolicy();
-		expect(normalized(mode.chatContainer)).toContain("RETAINED_PENDING_BASH_OUTPUT");
-		await prompt;
+		const rendered = normalized(mode.chatContainer);
+		expect(rendered.match(/RETAINED_PENDING_BASH_OUTPUT/g)).toHaveLength(1);
+		expect(rendered.match(/ORDINARY_HISTORICAL_BASH_OUTPUT/g)).toHaveLength(1);
+		expect(rendered.indexOf("ORDINARY_HISTORICAL_BASH_OUTPUT")).toBeLessThan(
+			rendered.indexOf("keep the session streaming"),
+		);
+		expect(rendered.indexOf("keep the session streaming")).toBeLessThan(
+			rendered.indexOf("ASSISTANT_STREAM_FINISHED"),
+		);
+		expect(rendered.indexOf("ASSISTANT_STREAM_FINISHED")).toBeLessThan(
+			rendered.indexOf("RETAINED_PENDING_BASH_OUTPUT"),
+		);
 	});
 
 	it("uses mounted related tool state when deciding orphaned thinking placeholder visibility", async () => {
