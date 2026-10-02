@@ -1,5 +1,12 @@
 import { join, resolve } from "node:path";
-import { resetCapabilitiesCache, setCapabilities, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import {
+	resetCapabilitiesCache,
+	setCapabilities,
+	Text,
+	type TUI,
+	type TuiMouseEvent,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
@@ -8,6 +15,7 @@ const imageConvertMocks = vi.hoisted(() => ({ convertToPng: vi.fn() }));
 vi.mock("../src/utils/image-convert.ts", () => imageConvertMocks);
 
 import { getReadmePath } from "../src/config.ts";
+import type { TranscriptBlockDescriptor } from "../src/core/extensions/transcript-presentation.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
@@ -473,6 +481,181 @@ describe("ToolExecutionComponent parity", () => {
 		const textLine = expandedLines.findIndex((line) => line.endsWith("  text: line one"));
 		expect(textLine).toBeGreaterThan(-1);
 		expect(expandedLines[textLine + 1]).toMatch(/^\s+ {4}line two$/);
+	});
+
+	test("provides a stable tool descriptor for each execution state", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-descriptor",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const pending: TranscriptBlockDescriptor = component.getTranscriptDescriptor();
+		expect(pending).toEqual({
+			id: "tool-descriptor",
+			kind: "tool",
+			toolName: "custom_tool",
+			state: "pending",
+			capabilities: { summary: true, expandable: true },
+		});
+
+		component.updateResult({ content: [], isError: false }, true);
+		expect(component.getTranscriptDescriptor().state).toBe("pending");
+		component.updateResult({ content: [], isError: false }, false);
+		expect(component.getTranscriptDescriptor().state).toBe("success");
+		component.updateResult({ content: [], isError: true }, false);
+		expect(component.getTranscriptDescriptor().state).toBe("error");
+		expect(component.getTranscriptDescriptor()).not.toBe(pending);
+	});
+
+	test("reports its current expansion state", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-expansion-state",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		expect(component.isExpanded()).toBe(false);
+		component.setExpanded(true);
+		expect(component.isExpanded()).toBe(true);
+		component.setExpanded(false);
+		expect(component.isExpanded()).toBe(false);
+	});
+
+	test("renders a custom call on one summary line with a running status", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call\ncall detail", 0, 0),
+			renderResult: () => new Text("secret result", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-summary-running",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const lines = component.renderSummary(120);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "").trim()).toBe("custom call [running]");
+		expect(stripAnsi(lines.join("\n"))).not.toContain("call detail");
+		expect(stripAnsi(lines.join("\n"))).not.toContain("secret result");
+	});
+
+	test("preserves custom ANSI styling and background continuity after truncation", () => {
+		const header = theme.fg("toolTitle", theme.bold("custom call with a long header"));
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text(header, 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-summary-styled",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const width = 30;
+		const rendered = component.renderSummary(width).join("\n");
+		const backgroundAnsi = theme.getBgAnsi("toolPendingBg");
+		const beforeBackgroundReset = rendered.slice(0, rendered.lastIndexOf("\x1b[49m"));
+		const afterFullResets = beforeBackgroundReset.split("\x1b[0m").slice(1);
+		expect(visibleWidth(rendered)).toBe(width);
+		expect(afterFullResets.length).toBeGreaterThan(0);
+		expect(afterFullResets.every((suffix) => suffix.startsWith(backgroundAnsi))).toBe(true);
+	});
+
+	test("prefers a custom call renderer over argument serialization", () => {
+		const args: Record<string, unknown> = {};
+		args.self = args;
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-summary-rendered-call",
+			args,
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		expect(stripAnsi(component.renderSummary(120).join("\\n"))).toContain("custom call [running]");
+	});
+
+	test("uses fallback arguments when no call renderer is available", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-summary-fallback",
+			{ path: "a-very-long-file-name.txt" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const lines = component.renderSummary(48);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "")).toContain('custom_tool {"path":"a-very-long');
+		expect(stripAnsi(lines[0] ?? "").trimEnd()).toMatch(/\.\.\. \[running\]$/);
+		expect(visibleWidth(lines[0] ?? "")).toBe(48);
+	});
+
+	test.each([
+		{ isError: false, status: "[ok]", background: "toolSuccessBg" },
+		{ isError: true, status: "[error]", background: "toolErrorBg" },
+	] as const)("renders $status without result output", ({ isError, status, background }) => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+			renderResult: () => new Text("secret result", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			`tool-summary-${status}`,
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "secret result" }], isError }, false);
+
+		const lines = component.renderSummary(120);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "").trim()).toBe(`custom call ${status}`);
+		expect(lines[0]?.startsWith(theme.bg(background, "").replace("\x1b[49m", ""))).toBe(true);
+		expect(stripAnsi(lines.join("\n"))).not.toContain("secret result");
+	});
+
+	test("preserves status at a narrow summary width", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-summary-narrow",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		expect(stripAnsi(component.renderSummary(4)[0] ?? "")).toBe("[running]");
 	});
 
 	test("collapses fallback results until expanded", () => {
