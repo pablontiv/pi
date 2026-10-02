@@ -16,6 +16,7 @@ import {
 	loadExtensions,
 } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
+import type { TranscriptBlockDescriptor } from "../src/core/extensions/transcript-presentation.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
@@ -617,6 +618,118 @@ describe("ExtensionRunner", () => {
 			const ctx = runner.createContext();
 			expect(ctx.mode).toBe("tui");
 			expect(ctx.hasUI).toBe(true);
+		});
+	});
+
+	describe("transcript presentation policies", () => {
+		const block: TranscriptBlockDescriptor = {
+			id: "tool-1",
+			kind: "tool",
+			toolName: "read",
+			state: "success",
+			capabilities: { summary: true, expandable: true },
+		};
+
+		it("invalidates without evaluating and disposes only its own registration once", async () => {
+			const runtime = createExtensionRuntime();
+			const firstPolicy = vi.fn(() => ({ density: "summary" as const }));
+			const secondPolicy = vi.fn(() => ({ density: "hidden" as const }));
+			let firstRegistration: { invalidate(): void; dispose(): void } | undefined;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					firstRegistration = pi.registerTranscriptPresentationPolicy(firstPolicy);
+					pi.registerTranscriptPresentationPolicy(secondPolicy);
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"<inline:transcript-registration>",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const invalidated = vi.fn();
+			runner.onTranscriptPresentationInvalidated(invalidated);
+
+			firstRegistration?.invalidate();
+			expect(invalidated).toHaveBeenCalledTimes(1);
+			expect(firstPolicy).not.toHaveBeenCalled();
+			expect(secondPolicy).not.toHaveBeenCalled();
+
+			firstRegistration?.dispose();
+			firstRegistration?.dispose();
+			expect(invalidated).toHaveBeenCalledTimes(2);
+			expect(extension.transcriptPresentationPolicies?.map((registration) => registration.policy)).toEqual([
+				secondPolicy,
+			]);
+			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "hidden" });
+			expect(firstPolicy).not.toHaveBeenCalled();
+			expect(secondPolicy).toHaveBeenCalledTimes(1);
+
+			runner.invalidate();
+			runtime.invalidateTranscriptPresentation();
+			expect(invalidated).toHaveBeenCalledTimes(2);
+		});
+
+		it("restricts policy registration to extension loading", async () => {
+			const runtime = createExtensionRuntime();
+			let registerLate: (() => void) | undefined;
+			await loadExtensionFromFactory(
+				(pi) => {
+					registerLate = () => {
+						pi.registerTranscriptPresentationPolicy(() => ({ density: "hidden" }));
+					};
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+
+			expect(registerLate).toBeDefined();
+			expect(() => registerLate?.()).toThrow("only be registered during extension loading");
+		});
+
+		it("isolates a failing registration once and continues composition", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const throwingPolicy = vi.fn(() => {
+				throw new Error("presentation failed");
+			});
+			const finalPolicy = vi.fn((_block: TranscriptBlockDescriptor, current: { readonly density: string }) => ({
+				density: current.density === "hidden" ? ("summary" as const) : ("full" as const),
+			}));
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerTranscriptPresentationPolicy(() => ({ density: "hidden" }));
+					pi.registerTranscriptPresentationPolicy(throwingPolicy);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:throwing-policy>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerTranscriptPresentationPolicy(finalPolicy);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:valid-policy>",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "summary" });
+			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "summary" });
+			expect(throwingPolicy).toHaveBeenCalledTimes(1);
+			expect(finalPolicy).toHaveBeenCalledTimes(2);
+			expect(errors).toMatchObject([
+				{
+					extensionPath: "<inline:throwing-policy>",
+					event: "transcript_presentation",
+					error: "presentation failed",
+				},
+			]);
 		});
 	});
 

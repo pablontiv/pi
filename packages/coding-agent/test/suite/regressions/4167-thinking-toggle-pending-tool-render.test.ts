@@ -51,6 +51,9 @@ type RenderSessionContextThis = {
 	getRegisteredToolDefinition(toolName: string): undefined;
 	maybeShowAssistantDiagnostics(message: AssistantMessage): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
+	addToolExecutionComponent(component: ToolExecutionComponent): void;
+	invalidateAssistantPresentationRelationships(): void;
+	reconcilePendingBashMessages(items: readonly AgentMessage[]): Map<AgentMessage, never>;
 	renderSessionItems: RenderSessionItems;
 };
 
@@ -81,10 +84,15 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
 		maybeShowAssistantDiagnostics: vi.fn(),
+		invalidateAssistantPresentationRelationships: vi.fn(),
+		reconcilePendingBashMessages: () => new Map<AgentMessage, never>(),
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
+		},
+		addToolExecutionComponent(component: ToolExecutionComponent) {
+			chatContainer.addChild(component);
 		},
 	};
 }

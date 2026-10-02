@@ -16,6 +16,7 @@ function createTreeUI() {
 	sessionManager.appendMessage(assistantMsg("reply"));
 	let selector: TreeSelectorComponent | undefined;
 	const onEscape = vi.fn();
+	const chatContainer = new Container();
 	const ui = {
 		sessionManager,
 		settingsManager: SettingsManager.inMemory(),
@@ -33,7 +34,8 @@ function createTreeUI() {
 		},
 		defaultEditor: { onEscape },
 		editor: { getText: () => "", setText: vi.fn() },
-		chatContainer: new Container(),
+		chatContainer,
+		clearChatContainer: () => chatContainer.clear(),
 		isInitialized: true,
 		footer: { invalidate: vi.fn() },
 		ui: { terminal: { rows: 24, setProgress: vi.fn() }, requestRender: vi.fn() },

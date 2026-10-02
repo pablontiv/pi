@@ -105,6 +105,7 @@ import type {
 	ExtensionSettingHandle,
 	RegisteredExtensionSetting,
 } from "./extension-settings.ts";
+import type { TranscriptPresentationPolicy } from "./transcript-presentation.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -1687,6 +1688,9 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
 
+	/** Register a synchronous, data-only presentation policy for Pi-owned transcript blocks. */
+	registerTranscriptPresentationPolicy(policy: TranscriptPresentationPolicy): TranscriptPresentationPolicyRegistration;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -2108,6 +2112,16 @@ export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
+export interface TranscriptPresentationPolicyRegistration {
+	invalidate(): void;
+	dispose(): void;
+}
+
+export interface RegisteredTranscriptPresentationPolicy {
+	policy: TranscriptPresentationPolicy;
+	sourceInfo: SourceInfo;
+}
+
 /**
  * Shared state created by loader, used during registration and runtime.
  * Contains flag values (defaults set during registration, CLI values set after).
@@ -2131,6 +2145,8 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Notify the attached transcript that presentation policies changed. */
+	invalidateTranscriptPresentation: () => void;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -2241,6 +2257,7 @@ export interface Extension {
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;
+	transcriptPresentationPolicies?: RegisteredTranscriptPresentationPolicy[];
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

@@ -40,6 +40,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	TranscriptPresentationPolicyRegistration,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -218,6 +219,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			eventBusUnsubscribers.add(trackedUnsubscribe);
 			return trackedUnsubscribe;
 		},
+		invalidateTranscriptPresentation: () => {},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
 		registerProvider: (name, config, extensionPath = "<unknown>") => {
@@ -412,6 +414,33 @@ function createExtensionAPI(
 			assertActive();
 			extension.entryRenderers ??= new Map();
 			extension.entryRenderers.set(customType, renderer as EntryRenderer);
+		},
+
+		registerTranscriptPresentationPolicy(policy): TranscriptPresentationPolicyRegistration {
+			assertActive();
+			if (state !== "loading") {
+				throw new Error("Transcript presentation policies can only be registered during extension loading.");
+			}
+			const registration = { policy, sourceInfo: extension.sourceInfo };
+			extension.transcriptPresentationPolicies ??= [];
+			extension.transcriptPresentationPolicies.push(registration);
+			let disposed = false;
+
+			return {
+				invalidate(): void {
+					assertActive();
+					runtime.invalidateTranscriptPresentation();
+				},
+				dispose(): void {
+					assertActive();
+					if (disposed) return;
+					disposed = true;
+					const registrations = extension.transcriptPresentationPolicies;
+					const index = registrations?.indexOf(registration) ?? -1;
+					if (index !== -1) registrations?.splice(index, 1);
+					runtime.invalidateTranscriptPresentation();
+				},
+			};
 		},
 
 		// Flag access - checks extension registered it, reads from runtime
