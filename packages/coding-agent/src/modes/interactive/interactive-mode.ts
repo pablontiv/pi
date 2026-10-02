@@ -277,7 +277,7 @@ type CompactionCostNotice = {
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
-type PendingBashMessage = Omit<BashExecutionMessage, "timestamp">;
+type PendingBashIdentity = Pick<Readonly<BashExecutionMessage>, "timestamp">;
 
 function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
@@ -540,7 +540,7 @@ export class InteractiveMode {
 
 	// Track pending bash components (shown in pending area, moved to chat on submit)
 	private pendingBashComponents: BashExecutionComponent[] = [];
-	private readonly pendingBashMessages = new Map<BashExecutionComponent, PendingBashMessage>();
+	private readonly pendingBashMessages = new Map<BashExecutionComponent, PendingBashIdentity>();
 
 	// Auto-compaction state
 	private autoCompactionEscapeHandler?: () => void;
@@ -612,6 +612,7 @@ export class InteractiveMode {
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
+			this.clearPendingBashComponents();
 			this.resetExtensionUI();
 		});
 		this.runtimeHost.setRebindSession(async () => {
@@ -2283,6 +2284,22 @@ export class InteractiveMode {
 			if (hasOutputPadding(component)) this.outputPaddingComponents.delete(component);
 			if (isExpandable(component)) this.expandableTranscriptComponents.delete(component);
 		}
+	}
+
+	/** Drop deferred bash UI owned by a session before the runtime binds a replacement session. */
+	private clearPendingBashComponents(): void {
+		for (const component of this.pendingBashComponents) {
+			const presented = this.presentedComponents.get(component);
+			if (presented) {
+				this.pendingMessagesContainer.removeChild(presented);
+				this.chatContainer.removeChild(presented);
+			}
+			this.presentedComponents.delete(component);
+			this.expandableTranscriptComponents.delete(component);
+			if (this.bashComponent === component) this.bashComponent = undefined;
+		}
+		this.pendingBashComponents = [];
+		this.pendingBashMessages.clear();
 	}
 
 	/**
@@ -4094,37 +4111,28 @@ export class InteractiveMode {
 		}
 	}
 
-	private matchesPendingBashMessage(message: BashExecutionMessage, pending: PendingBashMessage): boolean {
-		return (
-			message.command === pending.command &&
-			message.output === pending.output &&
-			message.exitCode === pending.exitCode &&
-			message.cancelled === pending.cancelled &&
-			message.truncated === pending.truncated &&
-			message.fullOutputPath === pending.fullOutputPath &&
-			message.excludeFromContext === pending.excludeFromContext
-		);
-	}
-
 	private reconcilePendingBashMessages(
 		items: readonly RenderSessionItem[],
 	): Map<AgentMessage, BashExecutionComponent> {
 		const reconciled = new Map<AgentMessage, BashExecutionComponent>();
-		let beforeItemIndex = items.length;
+		const pendingByTimestamp = new Map<number, BashExecutionComponent[]>();
 
-		for (let pendingIndex = this.pendingBashComponents.length - 1; pendingIndex >= 0; pendingIndex--) {
-			const component = this.pendingBashComponents[pendingIndex];
-			const pending = this.pendingBashMessages.get(component);
-			if (!pending || !this.presentedComponents.has(component)) continue;
+		for (const component of this.pendingBashComponents) {
+			const identity = this.pendingBashMessages.get(component);
+			if (!identity || !this.presentedComponents.has(component)) continue;
+			const components = pendingByTimestamp.get(identity.timestamp) ?? [];
+			components.push(component);
+			pendingByTimestamp.set(identity.timestamp, components);
+		}
 
-			for (let itemIndex = beforeItemIndex - 1; itemIndex >= 0; itemIndex--) {
-				const item = items[itemIndex];
-				if (!("role" in item) || item.role !== "bashExecution") continue;
-				if (!this.matchesPendingBashMessage(item, pending)) continue;
-				reconciled.set(item, component);
-				beforeItemIndex = itemIndex;
-				break;
-			}
+		for (const item of items) {
+			if (!("role" in item) || item.role !== "bashExecution") continue;
+			const components = pendingByTimestamp.get(item.timestamp);
+			if (!components) continue;
+			const component = components.shift();
+			if (!component) continue;
+			reconciled.set(item, component);
+			if (components.length === 0) pendingByTimestamp.delete(item.timestamp);
 		}
 
 		return reconciled;
@@ -7183,21 +7191,11 @@ export class InteractiveMode {
 				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
 				result.fullOutputPath,
 			);
+			// Record the result in session and retain the exact identity assigned to the persisted message.
+			const bashMessage = this.session.recordBashResult(command, result, { excludeFromContext });
 			if (this.pendingBashComponents.includes(this.bashComponent)) {
-				this.pendingBashMessages.set(this.bashComponent, {
-					role: "bashExecution",
-					command,
-					output: result.output,
-					exitCode: result.exitCode,
-					cancelled: result.cancelled,
-					truncated: result.truncated,
-					fullOutputPath: result.fullOutputPath,
-					excludeFromContext,
-				});
+				this.pendingBashMessages.set(this.bashComponent, { timestamp: bashMessage.timestamp });
 			}
-
-			// Record the result in session
-			this.session.recordBashResult(command, result, { excludeFromContext });
 			this.bashComponent = undefined;
 			this.ui.requestRender();
 			return;
@@ -7217,46 +7215,37 @@ export class InteractiveMode {
 		}
 		this.ui.requestRender();
 
+		const bashComponent = this.bashComponent;
 		try {
 			const result = await this.session.executeBash(
 				command,
 				(chunk) => {
-					if (this.bashComponent) {
-						this.bashComponent.appendOutput(chunk);
-						this.ui.requestRender();
-					}
+					bashComponent.appendOutput(chunk);
+					this.ui.requestRender();
 				},
-				{ excludeFromContext, operations: eventResult?.operations },
+				{
+					excludeFromContext,
+					operations: eventResult?.operations,
+					onMessageRecorded: (message) => {
+						if (this.pendingBashComponents.includes(bashComponent)) {
+							this.pendingBashMessages.set(bashComponent, { timestamp: message.timestamp });
+						}
+					},
+				},
 			);
 
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(
-					result.exitCode,
-					result.cancelled,
-					result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-					result.fullOutputPath,
-				);
-				if (this.pendingBashComponents.includes(this.bashComponent)) {
-					this.pendingBashMessages.set(this.bashComponent, {
-						role: "bashExecution",
-						command,
-						output: result.output,
-						exitCode: result.exitCode,
-						cancelled: result.cancelled,
-						truncated: result.truncated,
-						fullOutputPath: result.fullOutputPath,
-						excludeFromContext,
-					});
-				}
-			}
+			bashComponent.setComplete(
+				result.exitCode,
+				result.cancelled,
+				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
+				result.fullOutputPath,
+			);
 		} catch (error) {
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(undefined, false);
-			}
+			bashComponent.setComplete(undefined, false);
 			this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 
-		this.bashComponent = undefined;
+		if (this.bashComponent === bashComponent) this.bashComponent = undefined;
 		this.ui.requestRender();
 	}
 
