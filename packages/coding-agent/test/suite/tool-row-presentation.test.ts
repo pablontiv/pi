@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
@@ -79,13 +80,13 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 	throw new Error("Timed out waiting for mounted interactive tool state");
 }
 
-function createRuntimeHost(harness: { session: Harness["session"] }): AgentSessionRuntime {
+function createRuntimeHost(harness: { session: Harness["session"] }, onDispose?: () => void): AgentSessionRuntime {
 	return {
 		session: harness.session,
 		newSession: vi.fn(async () => ({ cancelled: true })),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => {}),
+		dispose: vi.fn(async () => onDispose?.()),
 		setBeforeSessionInvalidate: vi.fn(),
 		setRebindSession: vi.fn(),
 	} as unknown as AgentSessionRuntime;
@@ -217,10 +218,28 @@ describe("tool row presentation extension parity", () => {
 		expect(mode.pendingTools.get(TOOL_CALL_ID)).toBe(tool);
 		expect(normalized(presentation)).toContain("PARTIAL_RESULT");
 		await setMode(harness, "hidden");
+		expect(mountedTool(mode)).toBe(tool);
+		expect(mountedPresentation(mode, tool)).toBe(presentation);
 		expect(presentation.render(100)).toEqual([]);
 
 		releaseTool();
 		await prompt;
+		expect(mountedTool(mode)).toBe(tool);
+		expect(mountedPresentation(mode, tool)).toBe(presentation);
+		expect(presentation.render(100)).toEqual([]);
+
+		mode.setToolsExpanded(true);
+		const expandedHiddenLines = presentation.render(100);
+		expect(mountedTool(mode)).toBe(tool);
+		expect(mountedPresentation(mode, tool)).toBe(presentation);
+		expect(expandedHiddenLines.length).toBeGreaterThan(0);
+		expect(stripAnsi(expandedHiddenLines.join("\n"))).toContain("FINAL_RESULT");
+
+		mode.setToolsExpanded(false);
+		expect(mountedTool(mode)).toBe(tool);
+		expect(mountedPresentation(mode, tool)).toBe(presentation);
+		expect(presentation.render(100)).toEqual([]);
+
 		await setMode(harness, "compact");
 		expect(mountedTool(mode)).toBe(tool);
 		expect(normalized(presentation)).toContain("[ok]");
@@ -322,35 +341,60 @@ describe("tool row presentation extension parity", () => {
 		expect(Buffer.from(extensionFull.join("\n"))).toEqual(Buffer.from(baseline.join("\n")));
 	});
 
-	it("reconstructs the same compact tool row from a replacement session using persisted history", async () => {
-		const sessionManager = SessionManager.inMemory();
-		const first = await createHarness({
-			tools: [echoTool],
-			sessionManager,
-			extensionFactories: [toolRowPresentation],
-		});
-		harnesses.push(first);
-		first.setResponses(toolResponses());
-		const firstMode = await bindAndMount(first);
-		await setMode(first, "compact");
-		await first.session.prompt("persist history");
-		const firstLines = mountedPresentation(firstMode, mountedTool(firstMode)).render(100);
+	it("reconstructs the same compact tool row after reopening persisted history from disk", async () => {
+		const sessionRoot = mkdtempSync(join(tmpdir(), "pi-tool-row-history-"));
+		let first: Harness | undefined;
+		let replacement: Harness | undefined;
+		try {
+			const firstSessionManager = SessionManager.create(sessionRoot, sessionRoot);
+			first = await createHarness({
+				tools: [echoTool],
+				sessionManager: firstSessionManager,
+				extensionFactories: [toolRowPresentation],
+			});
+			first.setResponses(toolResponses());
+			const firstMode = await bindAndMount(first);
+			await setMode(first, "compact");
+			await first.session.prompt("persist history");
+			const firstLines = mountedPresentation(firstMode, mountedTool(firstMode)).render(100);
+			const firstRunner = first.session.extensionRunner;
+			const sessionFile = firstSessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a disk-backed session file");
+			expect(readFileSync(sessionFile, "utf8")).toContain('"role":"toolResult"');
 
-		first.cleanup();
-		harnesses.splice(harnesses.indexOf(first), 1);
-		const replacement = await createHarness({
-			tools: [echoTool],
-			sessionManager,
-			extensionFactories: [toolRowPresentation],
-		});
-		harnesses.push(replacement);
-		const replacementMode = await bindAndMount(replacement);
-		await setMode(replacement, "compact");
-		replacementMode.rebuildChatFromMessages();
-		expect(mountedPresentation(replacementMode, mountedTool(replacementMode)).render(100)).toEqual(firstLines);
+			// SessionManager persistence is synchronous; disposing the first production session
+			// closes its runtime before a distinct manager reads the completed JSONL file.
+			first.cleanup();
+			first = undefined;
+			const reopenedSessionManager = SessionManager.open(sessionFile, sessionRoot);
+			expect(reopenedSessionManager).not.toBe(firstSessionManager);
+
+			replacement = await createHarness({
+				tools: [echoTool],
+				sessionManager: reopenedSessionManager,
+				extensionFactories: [toolRowPresentation],
+			});
+			expect(replacement.session.extensionRunner).not.toBe(firstRunner);
+			const replacementMode = await bindAndMount(replacement);
+			await setMode(replacement, "compact");
+			replacementMode.rebuildChatFromMessages();
+			const reconstructedLines = mountedPresentation(replacementMode, mountedTool(replacementMode)).render(100);
+			expect(reconstructedLines).toEqual(firstLines);
+		} finally {
+			first?.cleanup();
+			replacement?.cleanup();
+			rmSync(sessionRoot, { recursive: true, force: true });
+		}
 	});
 
-	it("hidden mode suppresses only orphaned thinking while preserving ordinary thinking", async () => {
+	it("hides the exact orphaned placeholder even when a later policy keeps its related tool visible", async () => {
+		const thinkingSubtypes: Array<string | undefined> = [];
+		const forceToolsFull = (pi: ExtensionAPI) => {
+			pi.registerTranscriptPresentationPolicy((descriptor) => {
+				if (descriptor.kind === "thinking") thinkingSubtypes.push(descriptor.subtype);
+				return descriptor.kind === "tool" ? { density: "full" } : undefined;
+			});
+		};
 		const responses = [
 			fauxAssistantMessage(
 				[fauxThinking("PRIVATE_REASONING"), fauxToolCall("echo", { value: "alpha" }, { id: TOOL_CALL_ID })],
@@ -361,28 +405,33 @@ describe("tool row presentation extension parity", () => {
 		const orphaned = await createHarness({
 			tools: [echoTool],
 			settings: { hideThinkingBlock: true },
-			extensionFactories: [toolRowPresentation],
+			extensionFactories: [toolRowPresentation, forceToolsFull],
 		});
 		harnesses.push(orphaned);
 		orphaned.setResponses(responses);
 		const orphanedMode = await bindAndMount(orphaned);
 		await setMode(orphaned, "hidden");
 		await orphaned.session.prompt("orphaned thinking");
-		expect(normalized(orphanedMode.chatContainer)).not.toContain("Thinking...");
-		expect(normalized(orphanedMode.chatContainer)).not.toContain("ECHO_RESULT");
+		const orphanedOutput = normalized(orphanedMode.chatContainer);
+		expect(thinkingSubtypes).toContain("orphaned-thinking-placeholder");
+		expect(orphanedOutput).toContain("ECHO_RESULT");
+		expect(orphanedOutput).not.toContain("Thinking...");
 
+		thinkingSubtypes.length = 0;
 		const ordinary = await createHarness({
 			tools: [echoTool],
 			settings: { hideThinkingBlock: false },
-			extensionFactories: [toolRowPresentation],
+			extensionFactories: [toolRowPresentation, forceToolsFull],
 		});
 		harnesses.push(ordinary);
 		ordinary.setResponses(responses);
 		const ordinaryMode = await bindAndMount(ordinary);
 		await setMode(ordinary, "hidden");
 		await ordinary.session.prompt("ordinary thinking");
-		expect(normalized(ordinaryMode.chatContainer)).toContain("PRIVATE_REASONING");
-		expect(normalized(ordinaryMode.chatContainer)).not.toContain("ECHO_RESULT");
+		const ordinaryOutput = normalized(ordinaryMode.chatContainer);
+		expect(thinkingSubtypes).toContain(undefined);
+		expect(ordinaryOutput).toContain("PRIVATE_REASONING");
+		expect(ordinaryOutput).toContain("ECHO_RESULT");
 	});
 });
 
@@ -593,9 +642,16 @@ describe("non-interactive tool row transparency", () => {
 			extensionFactories: withExtension ? [toolRowPresentation] : undefined,
 		});
 		harness.setResponses(toolResponses());
+		let markDisposed = () => {};
+		const disposed = new Promise<void>((resolve) => {
+			markDisposed = resolve;
+		});
+		const runtimeHost = createRuntimeHost(harness, markDisposed);
+		let rpcStarted = false;
 		try {
-			void runRpcMode(createRuntimeHost(harness));
+			void runRpcMode(runtimeHost);
 			await vi.waitFor(() => expect(outputCapture.rpcLineHandler).toBeDefined());
+			rpcStarted = true;
 			outputCapture.rpcLineHandler?.(
 				JSON.stringify({
 					id: "prompt-1",
@@ -611,7 +667,19 @@ describe("non-interactive tool row transparency", () => {
 				messages: JSON.stringify(harness.session.messages),
 			};
 		} finally {
-			outputCapture.rpcLineHandler = undefined;
+			if (rpcStarted) {
+				const shutdown = (process.stdin.listeners("end") as NodeListener[]).find(
+					(listener) => !listeners.stdinEnd.includes(listener),
+				);
+				expect(shutdown).toBeDefined();
+				if (shutdown) {
+					vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+					shutdown();
+					await disposed;
+					await vi.waitFor(() => expect(outputCapture.rpcLineHandler).toBeUndefined());
+					expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+				}
+			}
 			harness.cleanup();
 			restoreListeners(listeners);
 		}
