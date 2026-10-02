@@ -288,6 +288,11 @@ type CompactionCostNotice = {
 	usage: Usage;
 };
 
+const NOTICE_TRANSCRIPT_DESCRIPTOR: TranscriptBlockDescriptor = Object.freeze({
+	kind: "notice",
+	capabilities: Object.freeze({ summary: false, expandable: false }),
+});
+
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
 type PendingBashIdentity = Required<Pick<Readonly<BashExecutionMessage>, "id">>;
 
@@ -2237,6 +2242,13 @@ export class InteractiveMode {
 		if (options.outputPadding) this.outputPaddingComponents.add(options.outputPadding);
 		if (options.expandable) this.expandableTranscriptComponents.add(options.expandable);
 		return presented;
+	}
+
+	private addTranscriptNotice(component: Component): TranscriptPresentationComponent {
+		const unit = new Container();
+		unit.addChild(new Spacer(1));
+		unit.addChild(component);
+		return this.addPresentedComponent(unit, () => NOTICE_TRANSCRIPT_DESCRIPTOR);
 	}
 
 	private addToolExecutionComponent(component: ToolExecutionComponent): TranscriptPresentationComponent {
@@ -4272,9 +4284,8 @@ export class InteractiveMode {
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
-		this.chatContainer.addChild(new Spacer(1));
 		const usage = formatCacheWarmingUsage(entry);
-		this.chatContainer.addChild(new ThemedText(() => theme.fg("dim", usage), 1, 0));
+		this.addTranscriptNotice(new ThemedText(() => theme.fg("dim", usage), 1, 0));
 	}
 
 	/**
@@ -4288,8 +4299,7 @@ export class InteractiveMode {
 		const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 		const cost = usage.cost.total >= 0.01 ? ` (~$${usage.cost.total.toFixed(2)})` : "";
 		const label = notice.kind === "compaction" ? "Compaction" : "Branch summary";
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
+		this.addTranscriptNotice(
 			new ThemedText(() => theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cost}`), 1, 0),
 		);
 	}
@@ -4330,8 +4340,7 @@ export class InteractiveMode {
 		if (droppedCount <= previousDroppedCount) return;
 
 		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
+		this.addTranscriptNotice(
 			new ThemedText(
 				() => theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun} (details in session)`),
 				1,
@@ -4364,8 +4373,7 @@ export class InteractiveMode {
 		} else if (miss.idleMs >= CACHE_TTL_MS) {
 			label = `Cache miss after ${Math.round(miss.idleMs / 60_000)}m idle`;
 		}
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
+		this.addTranscriptNotice(new ThemedText(() => theme.fg("warning", `${label}: ${reBilled}`), 1, 0));
 	}
 
 	renderInitialMessages(): void {
