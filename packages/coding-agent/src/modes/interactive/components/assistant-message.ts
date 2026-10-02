@@ -150,15 +150,21 @@ export class AssistantMessageComponent extends Container {
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
 				const relatedTools = message.content.filter((block) => block.type === "toolCall");
+				const isOrphanedThinkingPlaceholder =
+					hidden &&
+					relatedTools.length > 0 &&
+					message.stopReason !== "length" &&
+					message.stopReason !== "aborted" &&
+					message.stopReason !== "error" &&
+					!message.content.some((block) => block.type === "text" && block.text.trim());
 				const thinkingDescriptor: TranscriptBlockDescriptor = {
 					kind: "thinking",
-					...(hidden && relatedTools.length > 0 ? { subtype: "orphaned-thinking-placeholder" as const } : {}),
+					...(isOrphanedThinkingPlaceholder ? { subtype: "orphaned-thinking-placeholder" as const } : {}),
 					capabilities: { summary: false, expandable: false },
 				};
 				const thinkingPresentation = this.resolveTranscriptPresentation(thinkingDescriptor);
 				const allRelatedToolsHidden =
-					hidden &&
-					relatedTools.length > 0 &&
+					isOrphanedThinkingPlaceholder &&
 					relatedTools.every((toolCall) => {
 						const descriptor = this.getRelatedToolDescriptor(toolCall);
 						return (
