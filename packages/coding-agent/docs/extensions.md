@@ -92,7 +92,7 @@ Use the exported declarations in [`extensions/types.ts`](https://github.com/eare
 
 ## Present transcript blocks
 
-`pi.registerTranscriptPresentationPolicy()` lets an extension provide a synchronous, data-only policy for Pi-owned blocks in the interactive transcript. The policy receives a read-only `TranscriptBlockDescriptor` and the current read-only `TranscriptPresentation`, and returns a new presentation or `undefined`:
+`pi.registerTranscriptPresentationPolicy()` lets an extension provide a synchronous, data-only policy for Pi-owned blocks in the interactive transcript. Call it during extension factory initialization/loading; it throws when called outside that lifecycle. The policy receives a read-only `TranscriptBlockDescriptor` and the current read-only `TranscriptPresentation`, and returns a new presentation or `undefined`:
 
 ```typescript
 import type {
