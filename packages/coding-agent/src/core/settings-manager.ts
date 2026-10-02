@@ -1,3 +1,4 @@
+import { copyJson, type JsonValue } from "@earendil-works/chord";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_MAX_AGENT_RETRY_DELAY_MS, type Model, type Transport } from "@earendil-works/pi-ai";
 import type {
@@ -6,8 +7,9 @@ import type {
 	TerminalCapabilities,
 	WheelScrollLines,
 } from "@earendil-works/pi-tui";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -186,6 +188,7 @@ export interface Settings {
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
 	fullscreenWheelScrollLines?: WheelScrollLines; // default: "auto"; lines per wheel event, 1-100
+	extensionSettings?: Record<string, JsonValue>;
 }
 
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
@@ -246,9 +249,12 @@ function resolveDefaultTools(entries: string[]): string[] {
 	return tools;
 }
 
-/** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
+/** Deep merge settings: project/overrides take precedence, nested objects merge recursively. */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	const merged = deepMergeObjects(base as Record<string, unknown>, overrides as Record<string, unknown>) as Settings;
+	if (isMergeableObject(base.extensionSettings) && isMergeableObject(overrides.extensionSettings)) {
+		merged.extensionSettings = { ...base.extensionSettings, ...overrides.extensionSettings };
+	}
 	const defaultTools = mergeDefaultTools(base.defaultTools, overrides.defaultTools);
 	return defaultTools === undefined ? merged : { ...merged, defaultTools };
 }
@@ -293,22 +299,31 @@ function toSettingsError(scope: SettingsScope, error: unknown, path?: string): S
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
+	private globalLockPath: string;
+	private projectLockPath: string;
 
 	constructor(cwd: string, agentDir: string) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+		this.globalLockPath = this.getLockPath(this.globalSettingsPath);
+		this.projectLockPath = this.getLockPath(this.projectSettingsPath);
 	}
 
-	private acquireLockSyncWithRetry(path: string): () => void {
+	private getLockPath(settingsPath: string): string {
+		const pathHash = createHash("sha256").update(settingsPath).digest("hex");
+		return join(tmpdir(), `pi-settings-${pathHash}.lock`);
+	}
+
+	private acquireLockSyncWithRetry(path: string, lockPath: string): () => void {
 		const maxAttempts = 10;
 		const delayMs = 20;
 		let lastError: unknown;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				return lockfile.lockSync(path, { lockfilePath: lockPath, realpath: false });
 			} catch (error) {
 				const code =
 					typeof error === "object" && error !== null && "code" in error
@@ -330,31 +345,22 @@ export class FileSettingsStorage implements SettingsStorage {
 
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
+		const lockPath = scope === "global" ? this.globalLockPath : this.projectLockPath;
 		const dir = dirname(path);
 
-		let release: (() => void) | undefined;
+		const release = this.acquireLockSyncWithRetry(path, lockPath);
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
-				release = this.acquireLockSyncWithRetry(path);
-			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+			const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
+				// Only create the settings directory when the callback requests a write.
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
-				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
 				}
 				writeFileSync(path, next, "utf-8");
 			}
 		} finally {
-			if (release) {
-				release();
-			}
+			release();
 		}
 	}
 }
@@ -573,6 +579,38 @@ export class SettingsManager {
 
 	getProjectSettings(): Settings {
 		return structuredClone(this.projectSettings);
+	}
+
+	getExtensionSettingLayers(key: string): { global: unknown; project: unknown } {
+		const global = this.globalSettings.extensionSettings?.[key];
+		const project = this.projectSettings.extensionSettings?.[key];
+		return {
+			global: global === undefined ? undefined : copyJson(global),
+			project: project === undefined ? undefined : copyJson(project),
+		};
+	}
+
+	setExtensionSetting(key: string, value: unknown, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			this.assertProjectTrustedForWrite();
+			const copiedValue = copyJson(value);
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.extensionSettings = {
+				...(projectSettings.extensionSettings ?? {}),
+				[key]: copiedValue,
+			};
+			this.markProjectModified("extensionSettings", key);
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		const copiedValue = copyJson(value);
+		this.globalSettings.extensionSettings = {
+			...(this.globalSettings.extensionSettings ?? {}),
+			[key]: copiedValue,
+		};
+		this.markModified("extensionSettings", key);
+		this.save();
 	}
 
 	isProjectTrusted(): boolean {
