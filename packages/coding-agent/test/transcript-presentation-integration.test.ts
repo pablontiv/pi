@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { Container } from "@earendil-works/pi-tui";
+import type { Component, Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
@@ -39,8 +39,11 @@ type InteractiveInternals = {
 	pendingMessagesContainer: Container;
 	pendingTools: Map<string, ToolExecutionComponent>;
 	toolComponents: Set<ToolExecutionComponent>;
+	pendingBashComponents: Component[];
+	presentedComponents: Map<Component, Component>;
 	subscribeToAgent(): void;
 	bindTranscriptPresentationInvalidation(): void;
+	clearChatContainer(): void;
 	rebuildChatFromMessages(): void;
 	setToolsExpanded(expanded: boolean): void;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
@@ -266,6 +269,65 @@ describe("interactive transcript presentation integration", () => {
 		const historical = normalized(mode.chatContainer);
 		expect(historical).toContain("INTERCEPTED_BASH_OUTPUT");
 		expect(historical).toContain("LOCAL_BASH_OUTPUT");
+	});
+
+	it("retains and moves the exact pending bash wrapper across a chat rebuild", async () => {
+		let density: TranscriptDensity = "hidden";
+		let invalidatePolicy = () => {};
+		const harness = await createHarnessWithExtensions({
+			responses: [{ text: "streaming", delayMs: 50 }],
+			extensionFactories: [
+				{
+					path: "<pending-bash-presentation-policy>",
+					factory: (pi) => {
+						const registration = pi.registerTranscriptPresentationPolicy((block) =>
+							block.kind === "bash" ? { density } : undefined,
+						);
+						invalidatePolicy = () => registration.invalidate();
+						pi.on("user_bash", async () => ({
+							result: {
+								output: "RETAINED_PENDING_BASH_OUTPUT",
+								exitCode: 0,
+								cancelled: false,
+								truncated: false,
+							},
+						}));
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const mode = createInteractive(harness);
+		mode.subscribeToAgent();
+
+		const prompt = harness.session.prompt("keep the session streaming");
+		await waitUntil(() => harness.session.isStreaming);
+		await mode.handleBashCommand("retained");
+		const pendingBash = mode.pendingBashComponents[0];
+		if (!pendingBash) throw new Error("Expected a pending bash component");
+		const pendingWrapper = mode.presentedComponents.get(pendingBash);
+		if (!pendingWrapper) throw new Error("Expected a pending bash presentation wrapper");
+		expect(mode.pendingMessagesContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+
+		mode.clearChatContainer();
+		expect(mode.pendingBashComponents).toEqual([pendingBash]);
+		expect(mode.presentedComponents.get(pendingBash)).toBe(pendingWrapper);
+		expect(mode.pendingMessagesContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+
+		mode.flushPendingBashComponents();
+		expect(mode.pendingBashComponents).toEqual([]);
+		expect(mode.presentedComponents.get(pendingBash)).toBe(pendingWrapper);
+		expect(mode.pendingMessagesContainer.children).not.toContain(pendingWrapper);
+		expect(mode.chatContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+		expect(normalized(mode.chatContainer)).not.toContain("RETAINED_PENDING_BASH_OUTPUT");
+
+		mode.flushPendingBashComponents();
+		expect(mode.chatContainer.children.filter((child) => child === pendingWrapper)).toHaveLength(1);
+		density = "full";
+		invalidatePolicy();
+		expect(normalized(mode.chatContainer)).toContain("RETAINED_PENDING_BASH_OUTPUT");
+		await prompt;
 	});
 
 	it("uses mounted related tool state when deciding orphaned thinking placeholder visibility", async () => {

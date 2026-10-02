@@ -2294,12 +2294,16 @@ export class InteractiveMode {
 	}
 
 	private clearChatContainer(): void {
+		const clearedPresentations = new Set(this.chatContainer.children);
 		this.chatContainer.clear();
-		this.presentedComponents.clear();
-		this.toolComponents.clear();
-		this.assistantMessageComponents.clear();
-		this.outputPaddingComponents.clear();
-		this.expandableTranscriptComponents.clear();
+		for (const [component, presented] of this.presentedComponents) {
+			if (!clearedPresentations.has(presented)) continue;
+			this.presentedComponents.delete(component);
+			if (component instanceof ToolExecutionComponent) this.toolComponents.delete(component);
+			if (component instanceof AssistantMessageComponent) this.assistantMessageComponents.delete(component);
+			if (hasOutputPadding(component)) this.outputPaddingComponents.delete(component);
+			if (isExpandable(component)) this.expandableTranscriptComponents.delete(component);
+		}
 	}
 
 	/**
