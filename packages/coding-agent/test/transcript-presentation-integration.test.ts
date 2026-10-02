@@ -888,7 +888,12 @@ describe("interactive transcript presentation integration", () => {
 });
 
 describe("assistant thinking presentation relationships", () => {
+	const harnesses: Harness[] = [];
+
 	beforeAll(() => initTheme("dark"));
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
 
 	const message: AssistantMessage = {
 		role: "assistant",
@@ -945,11 +950,70 @@ describe("assistant thinking presentation relationships", () => {
 		},
 	);
 
-	it("omits the orphaned placeholder only when every related tool is hidden and leaves ordinary thinking unsubtyped", () => {
+	it.each([
+		["error", "Thinking...", "error"],
+		["aborted", "Thinking...", "error"],
+		["length", "Response was truncated before completion.", "pending"],
+	] satisfies ReadonlyArray<
+		readonly [AssistantMessage["stopReason"], string, NonNullable<TranscriptBlockDescriptor["state"]>]
+	>)(
+		"keeps the %s termination indication visible while mounted related tools and orphaned placeholders are hidden",
+		async (stopReason, indication, toolState) => {
+			const descriptors: TranscriptBlockDescriptor[] = [];
+			const harness = await createHarnessWithExtensions({
+				settings: { hideThinkingBlock: true },
+				extensionFactories: [
+					{
+						path: "<hidden-related-tools-policy>",
+						factory: (pi) => {
+							pi.registerTranscriptPresentationPolicy((block) => {
+								descriptors.push({ ...block, capabilities: { ...block.capabilities } });
+								return block.kind === "tool" || block.subtype === "orphaned-thinking-placeholder"
+									? { density: "hidden" }
+									: undefined;
+							});
+						},
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			const mode = createInteractive(harness);
+			mode.renderSessionItems([
+				{
+					...message,
+					content: message.content.map((block) =>
+						block.type === "toolCall" ? { ...block, name: "hidden_stop_tool" } : block,
+					),
+					stopReason,
+					...(stopReason === "error" ? { errorMessage: "Tool execution failed" } : {}),
+				},
+			]);
+
+			const rendered = normalized(mode.chatContainer);
+			expect(rendered).toContain(indication);
+			expect(rendered).not.toContain("hidden_stop_tool");
+			expect(descriptors).toContainEqual({
+				kind: "thinking",
+				capabilities: { summary: false, expandable: false },
+			});
+			expect(descriptors).toContainEqual({
+				id: "related-tool",
+				kind: "tool",
+				toolName: "hidden_stop_tool",
+				state: toolState,
+				capabilities: { summary: true, expandable: true },
+			});
+		},
+	);
+
+	it("omits a genuinely orphaned normal placeholder and leaves ordinary thinking visible", () => {
 		const descriptors: TranscriptBlockDescriptor[] = [];
 		const resolve = (block: Readonly<TranscriptBlockDescriptor>): TranscriptPresentation => {
 			descriptors.push({ ...block, capabilities: { ...block.capabilities } });
-			return { density: block.kind === "tool" ? "hidden" : "full" };
+			return {
+				density: block.kind === "tool" || block.subtype === "orphaned-thinking-placeholder" ? "hidden" : "full",
+			};
 		};
 		const getRelatedToolDescriptor = (toolCall: Readonly<{ id: string; name: string }>) => ({
 			id: toolCall.id,
@@ -981,6 +1045,11 @@ describe("assistant thinking presentation relationships", () => {
 			getRelatedToolDescriptor,
 		);
 		expect(ordinary.render(100).join("\n")).toContain("private reasoning");
+		expect(descriptors).toContainEqual({
+			kind: "thinking",
+			subtype: "orphaned-thinking-placeholder",
+			capabilities: { summary: false, expandable: false },
+		});
 		expect(descriptors.some((block) => block.kind === "thinking" && block.subtype === undefined)).toBe(true);
 	});
 });
