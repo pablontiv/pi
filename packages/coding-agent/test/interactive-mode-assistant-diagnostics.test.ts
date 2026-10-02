@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -52,7 +52,13 @@ type NoticeContext = {
 	chatContainer: Container;
 	settingsManager: { getShowCacheMissNotices(): boolean };
 	sessionManager: { getBranch(): Array<{ type: "message"; message: AssistantMessage }> };
+	addTranscriptNotice(component: Component): void;
 };
+
+function addTranscriptNotice(this: { chatContainer: Container }, component: Component): void {
+	this.chatContainer.addChild(new Spacer(1));
+	this.chatContainer.addChild(component);
+}
 
 const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "maybeShowThinkingDropNotice") as (
 	this: NoticeContext,
@@ -66,6 +72,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
 			sessionManager: { getBranch: () => [] },
+			addTranscriptNotice,
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
@@ -75,6 +82,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => false },
 			sessionManager: { getBranch: () => [] },
+			addTranscriptNotice,
 		};
 		maybeShowThinkingDropNotice.call(disabled, message);
 		expect(disabled.chatContainer.children).toHaveLength(0);
@@ -86,6 +94,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
 			sessionManager: { getBranch: () => [{ type: "message" as const, message }] },
+			addTranscriptNotice,
 		};
 
 		maybeShowThinkingDropNotice.call(context, { ...message, timestamp: 2 });
