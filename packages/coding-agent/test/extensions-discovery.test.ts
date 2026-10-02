@@ -4,6 +4,37 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import type {
+	TranscriptBlockDescriptor,
+	TranscriptBlockKind,
+	TranscriptBlockSubtype,
+	TranscriptDensity,
+	TranscriptPresentation,
+	TranscriptPresentationPolicy,
+	TranscriptPresentationPolicyRegistration,
+} from "../src/index.ts";
+
+const publicTranscriptPresentationTypes: {
+	kind: TranscriptBlockKind;
+	subtype: TranscriptBlockSubtype;
+	density: TranscriptDensity;
+	descriptor: TranscriptBlockDescriptor;
+	presentation: TranscriptPresentation;
+	policy: TranscriptPresentationPolicy;
+	registration: TranscriptPresentationPolicyRegistration;
+} = {
+	kind: "notice",
+	subtype: "orphaned-thinking-placeholder",
+	density: "full",
+	descriptor: {
+		kind: "notice",
+		capabilities: { summary: false, expandable: false },
+	},
+	presentation: { density: "full" },
+	policy: () => undefined,
+	registration: { invalidate: () => {}, dispose: () => {} },
+};
+void publicTranscriptPresentationTypes;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -404,6 +435,26 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("with-deps");
 		// The extension registers a 'parse_duration' tool
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
+	});
+
+	it("loads the generic transcript presentation policy example", async () => {
+		const examplePath = path.resolve(__dirname, "../examples/extensions/transcript-presentation.ts");
+		const result = await discoverAndLoadExtensions([examplePath], tempDir, tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].transcriptPresentationPolicies).toHaveLength(1);
+
+		const policy = result.extensions[0].transcriptPresentationPolicies?.[0]?.policy;
+		expect(
+			policy?.({ kind: "notice", capabilities: { summary: true, expandable: false } }, { density: "full" }),
+		).toEqual({ density: "hidden" });
+		expect(
+			policy?.({ kind: "custom-entry", capabilities: { summary: true, expandable: false } }, { density: "full" }),
+		).toEqual({ density: "summary" });
+		expect(
+			policy?.({ kind: "custom-entry", capabilities: { summary: false, expandable: false } }, { density: "full" }),
+		).toBeUndefined();
 	});
 
 	it("registers message and entry renderers", async () => {
