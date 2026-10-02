@@ -7,6 +7,7 @@ type RebindContext = {
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
+	bindTranscriptPresentationInvalidation: () => void;
 	subscribeToAgent: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
@@ -45,6 +46,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 				bindCount += 1;
 				return bindCount === 1 ? startupBind : replacementBind;
 			},
+			bindTranscriptPresentationInvalidation: () => {},
 			subscribeToAgent,
 			updateAvailableProviderCount: async () => {},
 			updateEditorBorderColor: () => {},
