@@ -99,7 +99,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
-import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
+import { type BashExecutionMessage, createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -290,6 +290,7 @@ type CompactionCostNotice = {
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
+type PendingBashMessage = Omit<BashExecutionMessage, "timestamp">;
 
 function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
@@ -552,6 +553,7 @@ export class InteractiveMode {
 
 	// Track pending bash components (shown in pending area, moved to chat on submit)
 	private pendingBashComponents: BashExecutionComponent[] = [];
+	private readonly pendingBashMessages = new Map<BashExecutionComponent, PendingBashMessage>();
 
 	// Auto-compaction state
 	private autoCompactionEscapeHandler?: () => void;
@@ -2295,9 +2297,11 @@ export class InteractiveMode {
 
 	private clearChatContainer(): void {
 		const clearedPresentations = new Set(this.chatContainer.children);
+		const pendingBashComponents = new Set(this.pendingBashComponents);
 		this.chatContainer.clear();
 		for (const [component, presented] of this.presentedComponents) {
 			if (!clearedPresentations.has(presented)) continue;
+			if (component instanceof BashExecutionComponent && pendingBashComponents.has(component)) continue;
 			this.presentedComponents.delete(component);
 			if (component instanceof ToolExecutionComponent) this.toolComponents.delete(component);
 			if (component instanceof AssistantMessageComponent) this.assistantMessageComponents.delete(component);
@@ -3952,9 +3956,24 @@ export class InteractiveMode {
 		}
 	}
 
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(
+		message: AgentMessage,
+		options?: { populateHistory?: boolean; retainedBashComponent?: BashExecutionComponent },
+	): void {
 		switch (message.role) {
 			case "bashExecution": {
+				const retainedComponent = options?.retainedBashComponent;
+				const retainedPresentation = retainedComponent
+					? this.presentedComponents.get(retainedComponent)
+					: undefined;
+				if (retainedPresentation) {
+					this.pendingMessagesContainer.removeChild(retainedPresentation);
+					if (!this.chatContainer.children.includes(retainedPresentation)) {
+						this.chatContainer.addChild(retainedPresentation);
+					}
+					break;
+				}
+
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
 				if (message.output) {
 					component.appendOutput(message.output);
@@ -4100,12 +4119,49 @@ export class InteractiveMode {
 		}
 	}
 
+	private matchesPendingBashMessage(message: BashExecutionMessage, pending: PendingBashMessage): boolean {
+		return (
+			message.command === pending.command &&
+			message.output === pending.output &&
+			message.exitCode === pending.exitCode &&
+			message.cancelled === pending.cancelled &&
+			message.truncated === pending.truncated &&
+			message.fullOutputPath === pending.fullOutputPath &&
+			message.excludeFromContext === pending.excludeFromContext
+		);
+	}
+
+	private reconcilePendingBashMessages(
+		items: readonly RenderSessionItem[],
+	): Map<AgentMessage, BashExecutionComponent> {
+		const reconciled = new Map<AgentMessage, BashExecutionComponent>();
+		let beforeItemIndex = items.length;
+
+		for (let pendingIndex = this.pendingBashComponents.length - 1; pendingIndex >= 0; pendingIndex--) {
+			const component = this.pendingBashComponents[pendingIndex];
+			const pending = this.pendingBashMessages.get(component);
+			if (!pending || !this.presentedComponents.has(component)) continue;
+
+			for (let itemIndex = beforeItemIndex - 1; itemIndex >= 0; itemIndex--) {
+				const item = items[itemIndex];
+				if (!("role" in item) || item.role !== "bashExecution") continue;
+				if (!this.matchesPendingBashMessage(item, pending)) continue;
+				reconciled.set(item, component);
+				beforeItemIndex = itemIndex;
+				break;
+			}
+		}
+
+		return reconciled;
+	}
+
 	private renderSessionItems(
 		items: readonly RenderSessionItem[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+		const reconciledPendingBash = this.reconcilePendingBashMessages(items);
 		// Cache misses are not persisted, unlike successful cache-warming usage.
 		// Re-derive them and inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
@@ -4185,7 +4241,10 @@ export class InteractiveMode {
 				}
 			} else {
 				// All other messages use standard rendering
-				this.addMessageToChat(message, options);
+				this.addMessageToChat(message, {
+					...options,
+					retainedBashComponent: reconciledPendingBash.get(message),
+				});
 			}
 		}
 
@@ -4972,9 +5031,12 @@ export class InteractiveMode {
 	private flushPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
 			const presented = this.presentedComponents.get(component);
+			this.pendingBashMessages.delete(component);
 			if (!presented) continue;
 			this.pendingMessagesContainer.removeChild(presented);
-			this.chatContainer.addChild(presented);
+			if (!this.chatContainer.children.includes(presented)) {
+				this.chatContainer.addChild(presented);
+			}
 		}
 		this.pendingBashComponents = [];
 	}
@@ -7131,6 +7193,18 @@ export class InteractiveMode {
 				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
 				result.fullOutputPath,
 			);
+			if (this.pendingBashComponents.includes(this.bashComponent)) {
+				this.pendingBashMessages.set(this.bashComponent, {
+					role: "bashExecution",
+					command,
+					output: result.output,
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					truncated: result.truncated,
+					fullOutputPath: result.fullOutputPath,
+					excludeFromContext,
+				});
+			}
 
 			// Record the result in session
 			this.session.recordBashResult(command, result, { excludeFromContext });
@@ -7172,6 +7246,18 @@ export class InteractiveMode {
 					result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
 					result.fullOutputPath,
 				);
+				if (this.pendingBashComponents.includes(this.bashComponent)) {
+					this.pendingBashMessages.set(this.bashComponent, {
+						role: "bashExecution",
+						command,
+						output: result.output,
+						exitCode: result.exitCode,
+						cancelled: result.cancelled,
+						truncated: result.truncated,
+						fullOutputPath: result.fullOutputPath,
+						excludeFromContext,
+					});
+				}
 			}
 		} catch (error) {
 			if (this.bashComponent) {
