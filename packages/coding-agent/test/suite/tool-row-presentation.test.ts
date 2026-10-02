@@ -667,21 +667,27 @@ describe("non-interactive tool row transparency", () => {
 				messages: JSON.stringify(harness.session.messages),
 			};
 		} finally {
-			if (rpcStarted) {
-				const shutdown = (process.stdin.listeners("end") as NodeListener[]).find(
-					(listener) => !listeners.stdinEnd.includes(listener),
-				);
-				expect(shutdown).toBeDefined();
-				if (shutdown) {
-					vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-					shutdown();
-					await disposed;
-					await vi.waitFor(() => expect(outputCapture.rpcLineHandler).toBeUndefined());
-					expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+			try {
+				if (rpcStarted) {
+					const shutdown = (process.stdin.listeners("end") as NodeListener[]).find(
+						(listener) => !listeners.stdinEnd.includes(listener),
+					);
+					expect(shutdown).toBeDefined();
+					if (shutdown) {
+						vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+						shutdown();
+						await disposed;
+						await vi.waitFor(() => expect(outputCapture.rpcLineHandler).toBeUndefined());
+						expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+					}
+				}
+			} finally {
+				try {
+					harness.cleanup();
+				} finally {
+					restoreListeners(listeners);
 				}
 			}
-			harness.cleanup();
-			restoreListeners(listeners);
 		}
 	}
 
