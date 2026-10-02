@@ -75,7 +75,15 @@ export default function toolRowPresentation(pi: ExtensionAPI): void {
 				ctx.ui.notify("Usage: /tool-rows [full|compact|hidden]", "error");
 				return;
 			}
-			mode.set(requested, { scope: "global" });
+			try {
+				mode.set(requested, { scope: "global" });
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not save tool rows: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return;
+			}
 			ctx.ui.notify(`Tool rows: ${requested}`, "info");
 		},
 	});
@@ -85,7 +93,15 @@ export default function toolRowPresentation(pi: ExtensionAPI): void {
 		handler: (ctx) => {
 			const currentIndex = MODES.indexOf(mode.get());
 			const next = MODES[(currentIndex + 1) % MODES.length];
-			mode.set(next, { scope: "global" });
+			try {
+				mode.set(next, { scope: "global" });
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not save tool rows: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return;
+			}
 			ctx.ui.notify(`Tool rows: ${next}`, "info");
 		},
 	});

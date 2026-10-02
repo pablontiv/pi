@@ -18,6 +18,17 @@ import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 const MODE_KEY = "pablontiv.tool-rows.mode";
 const MIGRATION_KEY = "pablontiv.tool-rows.migrated-v1";
 
+type SettingWrite = { key: string; value: unknown; scope: "global" | "project" };
+
+function createSettingState(globalValues: Record<string, unknown> = {}, projectValues: Record<string, unknown> = {}) {
+	return {
+		global: new Map(Object.entries(globalValues)),
+		project: new Map(Object.entries(projectValues)),
+		writes: [] as SettingWrite[],
+		failures: new Map<string, Error>(),
+	};
+}
+
 const contextActions: ExtensionContextActions = {
 	getModel: () => undefined,
 	getScopedModels: () => [],
@@ -38,11 +49,11 @@ async function createHarness(
 		project?: Record<string, unknown>;
 		rawSettings?: Record<string, unknown>;
 		extraFactories?: ExtensionFactory[];
+		settingState?: ReturnType<typeof createSettingState>;
 	} = {},
 ) {
-	const global = new Map(Object.entries(options.global ?? {}));
-	const project = new Map(Object.entries(options.project ?? {}));
-	const writes: Array<{ key: string; value: unknown; scope: "global" | "project" }> = [];
+	const settingState = options.settingState ?? createSettingState(options.global, options.project);
+	const { global, project, writes, failures } = settingState;
 	const notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }> = [];
 	const rawSettings = options.rawSettings ?? {};
 	const runtime = createExtensionRuntime();
@@ -62,7 +73,10 @@ async function createHarness(
 		{
 			getExtensionSettingLayers: (key) => ({ global: global.get(key), project: project.get(key) }),
 			setExtensionSetting: (key, value, scope) => {
-				writes.push({ key, value, scope });
+				const write = { key, value, scope };
+				const failure = failures.get(key);
+				if (failure) throw failure;
+				writes.push(write);
 				(scope === "global" ? global : project).set(key, value);
 			},
 		},
@@ -92,7 +106,7 @@ async function createHarness(
 		"tui",
 	);
 
-	return { runner, global, project, writes, notifications, rawSettings };
+	return { runner, extensions, global, project, writes, failures, notifications, rawSettings };
 }
 
 async function start(runner: ExtensionRunner): Promise<void> {
@@ -143,6 +157,18 @@ describe("tool row presentation extension", () => {
 		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("full");
 	});
 
+	it("reports the current mode without writing when the command has no argument", async () => {
+		const { runner, writes, notifications } = await createHarness({
+			global: { [MODE_KEY]: "hidden", [MIGRATION_KEY]: true },
+		});
+
+		await runCommand(runner, "   ");
+
+		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("hidden");
+		expect(writes).toEqual([]);
+		expect(notifications).toEqual([{ message: "Tool rows: hidden", type: "info" }]);
+	});
+
 	it("sets compact globally through the command and rejects invalid arguments", async () => {
 		const { runner, writes, notifications } = await createHarness();
 		await runCommand(runner, "compact");
@@ -155,6 +181,30 @@ describe("tool row presentation extension", () => {
 		expect(notifications.at(-1)).toEqual(
 			expect.objectContaining({ type: "error", message: expect.stringContaining("full|compact|hidden") }),
 		);
+	});
+
+	it("keeps the mode unchanged and reports persistence failures from the command and shortcut", async () => {
+		const { runner, writes, failures, notifications } = await createHarness();
+		failures.set(MODE_KEY, new Error("settings file is read-only"));
+
+		await runCommand(runner, "compact");
+		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("full");
+		expect(writes).toEqual([]);
+		expect(notifications).toEqual([
+			expect.objectContaining({ type: "error", message: expect.stringContaining("settings file is read-only") }),
+		]);
+		expect(notifications.some(({ message }) => message === "Tool rows: compact")).toBe(false);
+
+		notifications.length = 0;
+		const shortcut = runner.getShortcuts(new KeybindingsManager().getEffectiveConfig()).get("ctrl+alt+o");
+		expect(shortcut).toBeDefined();
+		await shortcut?.handler(runner.createContext());
+		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("full");
+		expect(writes).toEqual([]);
+		expect(notifications).toEqual([
+			expect.objectContaining({ type: "error", message: expect.stringContaining("settings file is read-only") }),
+		]);
+		expect(notifications.some(({ message }) => message === "Tool rows: compact")).toBe(false);
 	});
 
 	it("cycles full, compact, hidden, and full with the default shortcut", async () => {
@@ -198,6 +248,64 @@ describe("tool row presentation extension", () => {
 		await runner.emit({ type: "session_shutdown", reason: "quit" });
 		runner.setExtensionSettingValue(MODE_KEY, "hidden");
 		expect(invalidated).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves migration unmarked after a required mode write fails and retries on the next start", async () => {
+		const rawSettings: Record<string, unknown> = { toolRowsMode: "compact" };
+		const { runner, writes, failures } = await createHarness({ rawSettings });
+		const errors: string[] = [];
+		runner.onError((error) => errors.push(error.error));
+		failures.set(MODE_KEY, new Error("migration storage unavailable"));
+
+		await start(runner);
+		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("full");
+		expect(runner.getExtensionSettingValue(MIGRATION_KEY)).toBe(false);
+		expect(writes.some(({ key }) => key === MIGRATION_KEY)).toBe(false);
+		expect(errors).toEqual([expect.stringContaining("migration storage unavailable")]);
+
+		failures.delete(MODE_KEY);
+		await start(runner);
+		expect(runner.getExtensionSettingValue(MODE_KEY)).toBe("compact");
+		expect(runner.getExtensionSettingValue(MIGRATION_KEY)).toBe(true);
+		expect(writes).toEqual([
+			{ key: MODE_KEY, value: "compact", scope: "global" },
+			{ key: MIGRATION_KEY, value: true, scope: "global" },
+		]);
+	});
+
+	it("replaces the loaded runtime without retaining the old handle, listener, or policy", async () => {
+		const settingState = createSettingState({ [MIGRATION_KEY]: true });
+		const first = await createHarness({ settingState });
+		const firstInvalidated = vi.fn();
+		first.runner.onTranscriptPresentationInvalidated(firstInvalidated);
+		await start(first.runner);
+		const staleCommand = first.runner.getCommand("tool-rows");
+		const staleContext = first.runner.createCommandContext();
+		const stalePolicy = first.extensions[0]?.transcriptPresentationPolicies?.[0]?.policy;
+		expect(staleCommand).toBeDefined();
+		expect(stalePolicy).toBeDefined();
+		expect(first.runner.resolveTranscriptPresentation(block("tool"))).toEqual({ density: "full" });
+
+		await first.runner.emit({ type: "session_shutdown", reason: "reload" });
+		first.runner.invalidate("stale tool-row runtime");
+
+		const replacement = await createHarness({ settingState });
+		const replacementInvalidated = vi.fn();
+		replacement.runner.onTranscriptPresentationInvalidated(replacementInvalidated);
+		await start(replacement.runner);
+		const shortcut = replacement.runner.getShortcuts(new KeybindingsManager().getEffectiveConfig()).get("ctrl+alt+o");
+		expect(shortcut).toBeDefined();
+		await shortcut?.handler(replacement.runner.createContext());
+
+		expect(replacement.extensions[0]).not.toBe(first.extensions[0]);
+		expect(replacement.extensions[0]?.transcriptPresentationPolicies?.[0]?.policy).not.toBe(stalePolicy);
+		expect(replacement.runner.getExtensionSettingValue(MODE_KEY)).toBe("compact");
+		expect(replacement.runner.resolveTranscriptPresentation(block("tool"))).toEqual({ density: "summary" });
+		expect(replacementInvalidated).toHaveBeenCalledTimes(1);
+		expect(firstInvalidated).not.toHaveBeenCalled();
+		await expect(staleCommand?.handler("", staleContext)).rejects.toThrow("stale tool-row runtime");
+		expect(() => stalePolicy?.(block("tool"), { density: "full" })).toThrow("stale tool-row runtime");
+		expect(() => first.runner.resolveTranscriptPresentation(block("tool"))).toThrow("stale tool-row runtime");
 	});
 
 	it("migrates a valid legacy mode once, marks it globally, and retains the legacy field", async () => {
