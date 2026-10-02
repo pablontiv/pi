@@ -289,7 +289,7 @@ type CompactionCostNotice = {
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
-type PendingBashIdentity = Pick<Readonly<BashExecutionMessage>, "timestamp">;
+type PendingBashIdentity = Required<Pick<Readonly<BashExecutionMessage>, "id">>;
 
 function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
@@ -4129,24 +4129,20 @@ export class InteractiveMode {
 		items: readonly RenderSessionItem[],
 	): Map<AgentMessage, BashExecutionComponent> {
 		const reconciled = new Map<AgentMessage, BashExecutionComponent>();
-		const pendingByTimestamp = new Map<number, BashExecutionComponent[]>();
+		const pendingById = new Map<string, BashExecutionComponent>();
 
 		for (const component of this.pendingBashComponents) {
 			const identity = this.pendingBashMessages.get(component);
 			if (!identity || !this.presentedComponents.has(component)) continue;
-			const components = pendingByTimestamp.get(identity.timestamp) ?? [];
-			components.push(component);
-			pendingByTimestamp.set(identity.timestamp, components);
+			pendingById.set(identity.id, component);
 		}
 
 		for (const item of items) {
-			if (!("role" in item) || item.role !== "bashExecution") continue;
-			const components = pendingByTimestamp.get(item.timestamp);
-			if (!components) continue;
-			const component = components.shift();
+			if (!("role" in item) || item.role !== "bashExecution" || item.id === undefined) continue;
+			const component = pendingById.get(item.id);
 			if (!component) continue;
 			reconciled.set(item, component);
-			if (components.length === 0) pendingByTimestamp.delete(item.timestamp);
+			pendingById.delete(item.id);
 		}
 
 		return reconciled;
@@ -7151,7 +7147,8 @@ export class InteractiveMode {
 	}
 
 	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
-		const extensionRunner = this.session.extensionRunner;
+		const originatingSession = this.session;
+		const extensionRunner = originatingSession.extensionRunner;
 
 		// Emit user_bash event to let extensions intercept
 		let eventResult: UserBashEventResult | undefined;
@@ -7160,10 +7157,18 @@ export class InteractiveMode {
 				type: "user_bash",
 				command,
 				excludeFromContext,
-				cwd: this.sessionManager.getCwd(),
+				cwd: originatingSession.sessionManager.getCwd(),
 			});
 		} catch {
 			// The extension runner already reported the error. Do not fall back to local execution.
+			return;
+		}
+
+		// A boundary may complete while an extension handles the event. Never attach old-session UI afterward.
+		if (this.session !== originatingSession) {
+			if (eventResult?.result) {
+				originatingSession.recordBashResult(command, eventResult.result, { excludeFromContext });
+			}
 			return;
 		}
 
@@ -7173,7 +7178,7 @@ export class InteractiveMode {
 
 			// Create UI component for display
 			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-			if (this.session.isStreaming) {
+			if (originatingSession.isStreaming) {
 				this.addBashExecutionComponent(this.bashComponent, this.pendingMessagesContainer);
 				this.pendingBashComponents.push(this.bashComponent);
 			} else {
@@ -7191,9 +7196,9 @@ export class InteractiveMode {
 				result.fullOutputPath,
 			);
 			// Record the result in session and retain the exact identity assigned to the persisted message.
-			const bashMessage = this.session.recordBashResult(command, result, { excludeFromContext });
-			if (this.pendingBashComponents.includes(this.bashComponent)) {
-				this.pendingBashMessages.set(this.bashComponent, { timestamp: bashMessage.timestamp });
+			const bashMessage = originatingSession.recordBashResult(command, result, { excludeFromContext });
+			if (bashMessage.id !== undefined && this.pendingBashComponents.includes(this.bashComponent)) {
+				this.pendingBashMessages.set(this.bashComponent, { id: bashMessage.id });
 			}
 			this.bashComponent = undefined;
 			this.ui.requestRender();
@@ -7201,7 +7206,7 @@ export class InteractiveMode {
 		}
 
 		// Normal execution path (possibly with custom operations)
-		const isDeferred = this.session.isStreaming;
+		const isDeferred = originatingSession.isStreaming;
 		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
 
 		if (isDeferred) {
@@ -7216,7 +7221,7 @@ export class InteractiveMode {
 
 		const bashComponent = this.bashComponent;
 		try {
-			const result = await this.session.executeBash(
+			const result = await originatingSession.executeBash(
 				command,
 				(chunk) => {
 					bashComponent.appendOutput(chunk);
@@ -7226,8 +7231,8 @@ export class InteractiveMode {
 					excludeFromContext,
 					operations: eventResult?.operations,
 					onMessageRecorded: (message) => {
-						if (this.pendingBashComponents.includes(bashComponent)) {
-							this.pendingBashMessages.set(bashComponent, { timestamp: message.timestamp });
+						if (message.id !== undefined && this.pendingBashComponents.includes(bashComponent)) {
+							this.pendingBashMessages.set(bashComponent, { id: message.id });
 						}
 					},
 				},
@@ -7241,7 +7246,9 @@ export class InteractiveMode {
 			);
 		} catch (error) {
 			bashComponent.setComplete(undefined, false);
-			this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			if (this.session === originatingSession) {
+				this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			}
 		}
 
 		if (this.bashComponent === bashComponent) this.bashComponent = undefined;
