@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -121,6 +121,54 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		expect(result.output).toContain("hello");
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");
+	});
+
+	it("assigns unique persisted ids when bash timestamps collide", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+		try {
+			const first = harness.session.recordBashResult("same", {
+				output: "same",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+			});
+			const second = harness.session.recordBashResult("same", {
+				output: "same",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+			});
+
+			expect(first.timestamp).toBe(second.timestamp);
+			expect(first.id).toEqual(expect.any(String));
+			expect(second.id).toEqual(expect.any(String));
+			expect(first.id).not.toBe(second.id);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("does not turn recorded bash success into failure when its notification callback throws", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) => {
+				options.onData(Buffer.from("recorded success"));
+				return { exitCode: 0 };
+			},
+		};
+
+		const result = await harness.session.executeBash("callback", undefined, {
+			operations,
+			onMessageRecorded: () => {
+				throw new Error("notification failed");
+			},
+		});
+
+		expect(result.output).toContain("recorded success");
+		expect(harness.session.messages.at(-1)?.role).toBe("bashExecution");
 	});
 
 	it("cancels running bash commands with abortBash", async () => {

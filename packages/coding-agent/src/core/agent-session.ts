@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import {
@@ -3822,7 +3823,11 @@ export class AgentSession {
 			);
 
 			const bashMessage = this.recordBashResult(command, result, options);
-			options?.onMessageRecorded?.(bashMessage);
+			try {
+				options?.onMessageRecorded?.(bashMessage);
+			} catch {
+				// Recording has already succeeded; presentation notification failures must not change execution success.
+			}
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
@@ -3840,6 +3845,7 @@ export class AgentSession {
 	): Readonly<BashExecutionMessage> {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
+			id: randomUUID(),
 			command,
 			output: result.output,
 			exitCode: result.exitCode,

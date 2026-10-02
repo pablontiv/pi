@@ -42,7 +42,7 @@ type InteractiveInternals = {
 	pendingTools: Map<string, ToolExecutionComponent>;
 	toolComponents: Set<ToolExecutionComponent>;
 	pendingBashComponents: Component[];
-	pendingBashMessages: Map<Component, Pick<BashExecutionMessage, "timestamp">>;
+	pendingBashMessages: Map<Component, Pick<BashExecutionMessage, "id">>;
 	presentedComponents: Map<Component, Component>;
 	subscribeToAgent(): void;
 	bindTranscriptPresentationInvalidation(): void;
@@ -53,6 +53,7 @@ type InteractiveInternals = {
 	setToolsExpanded(expanded: boolean): void;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
 	flushPendingBashComponents(): void;
+	showError(message: string): void;
 	handleReloadCommand(): Promise<void>;
 };
 
@@ -376,9 +377,11 @@ describe("interactive transcript presentation integration", () => {
 		);
 	});
 
-	it("keeps identical pending bash wrappers bound to their exact persisted identity across partial and complete history", async () => {
+	it("reconciles colliding pending bash messages only by persisted id across partial and complete history", async () => {
 		let density: TranscriptDensity = "hidden";
 		let invalidatePolicy = () => {};
+		const timestamp = 1_800_000_000_000;
+		const now = vi.spyOn(Date, "now").mockReturnValue(timestamp);
 		const harness = await createHarnessWithExtensions({
 			responses: [{ text: "IDENTITY_STREAM_FINISHED", delayMs: 50 }],
 			extensionFactories: [
@@ -389,78 +392,94 @@ describe("interactive transcript presentation integration", () => {
 							block.kind === "bash" ? { density } : undefined,
 						);
 						invalidatePolicy = () => registration.invalidate();
-						pi.on("user_bash", async () => ({
-							result: {
-								output: "IDENTICAL_BASH_OUTPUT",
-								exitCode: 0,
-								cancelled: false,
-								truncated: false,
-							},
-						}));
+						pi.on("user_bash", async (event) =>
+							event.command === "intercepted"
+								? {
+										result: {
+											output: "IDENTICAL_BASH_OUTPUT",
+											exitCode: 0,
+											cancelled: false,
+											truncated: false,
+										},
+									}
+								: undefined,
+						);
 					},
 				},
 			],
 		});
 		harnesses.push(harness);
-		await harness.session.bindExtensions({});
-		const mode = createInteractive(harness);
-		mode.subscribeToAgent();
+		try {
+			await harness.session.bindExtensions({});
+			const mode = createInteractive(harness);
+			mode.subscribeToAgent();
 
-		await mode.handleBashCommand("identical");
-		const olderTimestamp = harness.session.messages.find(
-			(message): message is BashExecutionMessage => message.role === "bashExecution",
-		)?.timestamp;
-		if (olderTimestamp === undefined) throw new Error("Expected older bash history");
-		await waitUntil(() => Date.now() > olderTimestamp);
-		const prompt = harness.session.prompt("keep identity pending");
-		await waitUntil(() => harness.session.isStreaming);
-		await mode.handleBashCommand("identical");
-		const afterFirstPending = Date.now();
-		await waitUntil(() => Date.now() > afterFirstPending);
-		await mode.handleBashCommand("identical");
-		const pendingBash = [...mode.pendingBashComponents];
-		const pendingWrappers = pendingBash.map((component) => {
-			const wrapper = mode.presentedComponents.get(component);
-			if (!wrapper) throw new Error("Expected a pending bash presentation wrapper");
-			return wrapper;
-		});
-		expect(pendingBash).toHaveLength(2);
+			const prompt = harness.session.prompt("keep identity pending");
+			await waitUntil(() => harness.session.isStreaming);
+			await mode.handleBashCommand("intercepted");
+			await mode.handleBashCommand("printf DISTINCT_PENDING_OUTPUT");
+			const pendingBash = [...mode.pendingBashComponents];
+			const pendingWrappers = pendingBash.map((component) => {
+				const wrapper = mode.presentedComponents.get(component);
+				if (!wrapper) throw new Error("Expected a pending bash presentation wrapper");
+				return wrapper;
+			});
+			expect(pendingBash).toHaveLength(2);
 
-		await prompt;
-		const bashHistory = harness.session.messages.filter(
-			(message): message is BashExecutionMessage => message.role === "bashExecution",
-		);
-		expect(bashHistory).toHaveLength(3);
-		expect(new Set(bashHistory.map((message) => message.timestamp)).size).toBe(3);
-		expect(pendingBash.map((component) => mode.pendingBashMessages.get(component)?.timestamp)).toEqual(
-			bashHistory.slice(1).map((message) => message.timestamp),
-		);
+			await prompt;
+			const bashHistory = harness.session.messages.filter(
+				(message): message is BashExecutionMessage => message.role === "bashExecution",
+			);
+			expect(bashHistory).toHaveLength(2);
+			expect(bashHistory.map((message) => message.timestamp)).toEqual([timestamp, timestamp]);
+			expect(bashHistory.map((message) => message.id)).toEqual([expect.any(String), expect.any(String)]);
+			expect(new Set(bashHistory.map((message) => message.id)).size).toBe(2);
+			expect(pendingBash.map((component) => mode.pendingBashMessages.get(component)?.id)).toEqual(
+				bashHistory.map((message) => message.id),
+			);
 
-		// A partial history containing only the older identical result cannot claim either pending wrapper.
-		mode.clearChatContainer();
-		mode.renderSessionItems(bashHistory.slice(0, 1));
-		expect(mode.pendingBashComponents).toEqual(pendingBash);
-		expect(mode.pendingMessagesContainer.children).toEqual(expect.arrayContaining(pendingWrappers));
-		for (const wrapper of pendingWrappers) {
-			expect(mode.chatContainer.children).not.toContain(wrapper);
+			const firstMessage = bashHistory[0];
+			if (!firstMessage) throw new Error("Expected first bash history message");
+			const { id: _persistedId, ...legacyTwin } = firstMessage;
+
+			// A legacy message can have identical timestamp and content, but cannot claim a pending wrapper.
+			mode.clearChatContainer();
+			mode.renderSessionItems([legacyTwin]);
+			expect(mode.pendingBashComponents).toEqual(pendingBash);
+			expect(mode.pendingMessagesContainer.children).toEqual(expect.arrayContaining(pendingWrappers));
+			for (const wrapper of pendingWrappers) expect(mode.chatContainer.children).not.toContain(wrapper);
+
+			// Partial history claims only the wrapper whose exact id is present, regardless of timestamp collision.
+			mode.clearChatContainer();
+			mode.renderSessionItems([legacyTwin, bashHistory[1]!]);
+			expect(mode.chatContainer.children).not.toContain(pendingWrappers[0]);
+			expect(mode.chatContainer.children).toContain(pendingWrappers[1]);
+			expect(mode.pendingMessagesContainer.children).toContain(pendingWrappers[0]);
+			expect(mode.pendingMessagesContainer.children).not.toContain(pendingWrappers[1]);
+
+			// Later full history restores exact persisted order and remains idempotent on another rebuild and flush.
+			for (let rebuild = 0; rebuild < 2; rebuild++) {
+				mode.clearChatContainer();
+				mode.renderSessionItems([legacyTwin, ...bashHistory]);
+				expect(mode.chatContainer.children.filter((child) => pendingWrappers.includes(child))).toEqual(
+					pendingWrappers,
+				);
+			}
+			mode.flushPendingBashComponents();
+			mode.flushPendingBashComponents();
+			expect(mode.pendingBashComponents).toEqual([]);
+			expect(mode.chatContainer.children.filter((child) => pendingWrappers.includes(child))).toEqual(
+				pendingWrappers,
+			);
+			density = "full";
+			invalidatePolicy();
+			const rendered = normalized(mode.chatContainer);
+			expect(rendered.match(/IDENTICAL_BASH_OUTPUT/g)).toHaveLength(2);
+			// The distinct token appears once in the command header and once in its output.
+			expect(rendered.match(/DISTINCT_PENDING_OUTPUT/g)).toHaveLength(2);
+		} finally {
+			now.mockRestore();
 		}
-
-		// Complete history reconciles both exact identities in persisted order without replacing either component.
-		mode.clearChatContainer();
-		mode.renderSessionItems(bashHistory);
-		expect(mode.pendingBashComponents).toEqual(pendingBash);
-		expect(mode.chatContainer.children.filter((child) => pendingWrappers.includes(child))).toEqual(pendingWrappers);
-		for (const wrapper of pendingWrappers) {
-			expect(mode.pendingMessagesContainer.children).not.toContain(wrapper);
-		}
-
-		mode.flushPendingBashComponents();
-		mode.flushPendingBashComponents();
-		expect(mode.pendingBashComponents).toEqual([]);
-		expect(mode.chatContainer.children.filter((child) => pendingWrappers.includes(child))).toEqual(pendingWrappers);
-		density = "full";
-		invalidatePolicy();
-		expect(normalized(mode.chatContainer).match(/IDENTICAL_BASH_OUTPUT/g)).toHaveLength(3);
 	});
 
 	it("drops prior-session pending bash identity at the runtime session boundary before rebuilding", async () => {
@@ -520,6 +539,47 @@ describe("interactive transcript presentation integration", () => {
 		mode.flushPendingBashComponents();
 		expect(mode.chatContainer.children).not.toContain(oldWrapper);
 		expect(normalized(mode.chatContainer)).not.toContain("OLD_SESSION_PENDING_BASH_OUTPUT");
+	});
+
+	it("does not report a delayed old-session bash rejection in replacement UI", async () => {
+		let beforeSessionInvalidate = () => {};
+		let rejectBash: (error: Error) => void = () => {};
+		let markBashStarted = () => {};
+		const bashStarted = new Promise<void>((resolve) => {
+			markBashStarted = resolve;
+		});
+		const harness = await createHarnessWithExtensions({ responses: ["unused"] });
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const executeBash = vi.spyOn(harness.session, "executeBash").mockImplementation(async () => {
+			markBashStarted();
+			return await new Promise((_resolve, reject) => {
+				rejectBash = reject;
+			});
+		});
+		const replacementHarness = await createHarnessWithExtensions({ responses: ["replacement"] });
+		harnesses.push(replacementHarness);
+		await replacementHarness.session.bindExtensions({});
+		let currentSession = harness.session;
+		const mode = createInteractive(harness, {
+			captureBeforeSessionInvalidate: (callback) => {
+				beforeSessionInvalidate = callback;
+			},
+			getSession: () => currentSession,
+		});
+		const showError = vi.spyOn(mode, "showError");
+
+		const command = mode.handleBashCommand("delayed old-session failure");
+		await bashStarted;
+		beforeSessionInvalidate();
+		currentSession = replacementHarness.session;
+		mode.renderCurrentSessionState();
+		rejectBash(new Error("OLD_SESSION_REJECTION"));
+		await command;
+
+		expect(executeBash).toHaveBeenCalledOnce();
+		expect(showError).not.toHaveBeenCalled();
+		expect(normalized(mode.chatContainer)).not.toContain("OLD_SESSION_REJECTION");
 	});
 
 	it("uses mounted related tool state when deciding orphaned thinking placeholder visibility", async () => {
