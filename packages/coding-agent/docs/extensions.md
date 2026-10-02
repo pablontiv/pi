@@ -83,9 +83,42 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 | Add an MCP server | `pi.registerMcpServer()` |
 | Route each request to a model | [`pi.registerVirtualModel()`](virtual-models.md) |
 | Add terminal rendering | Renderer registration and `ctx.ui` |
+| Change interactive transcript presentation | `pi.registerTranscriptPresentationPolicy()` |
 | Communicate with another extension | `pi.events` |
 
 Use the exported declarations in [`extensions/types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts) for exact event, context, tool, and result types.
+
+<a id="transcript-presentation-policies"></a>
+
+## Present transcript blocks
+
+`pi.registerTranscriptPresentationPolicy()` lets an extension provide a synchronous, data-only policy for Pi-owned blocks in the interactive transcript. Call it during extension factory initialization/loading; it throws when called outside that lifecycle. The policy receives a read-only `TranscriptBlockDescriptor` and the current read-only `TranscriptPresentation`, and returns a new presentation or `undefined`:
+
+```typescript
+import type {
+  ExtensionAPI,
+  TranscriptPresentationPolicy,
+} from "@earendil-works/pi-coding-agent";
+
+const policy: TranscriptPresentationPolicy = (block) => {
+  if (block.kind === "notice") return { density: "hidden" };
+  return block.capabilities.summary ? { density: "summary" } : undefined;
+};
+
+export default function (pi: ExtensionAPI) {
+  pi.registerTranscriptPresentationPolicy(policy);
+}
+```
+
+The checked [`transcript-presentation.ts`](../examples/extensions/transcript-presentation.ts) example applies this generic policy without constructing UI components or inspecting mutable messages. Descriptors expose a block kind, optional identity and subtype, optional tool metadata, state, and `summary`/`expandable` capabilities. Presentation densities are `full`, `summary`, and `hidden`.
+
+Policies execute synchronously in extension load order and then registration order. Each policy receives the preceding result; returning `undefined` preserves it. The initial density is `full`. A `summary` result for a block whose `capabilities.summary` is false falls back to `full`. If a policy throws, Pi leaves the current presentation unchanged, reports the error once for that registration, and disables that registration for the rest of the extension runtime; other registrations continue to run.
+
+Registration returns an object with `invalidate()` and `dispose()`. Call `invalidate()` when state captured by a policy changes; Pi reevaluates the policy during rendering, so live components and historical blocks update without clearing pending work or rebuilding the transcript. `invalidate()` is a no-op when no interactive transcript is attached. `dispose()` removes that registration and invalidates the transcript once. User expansion temporarily overrides policy with `full` for an expandable block; collapsing reapplies the policy.
+
+The same descriptors and policy resolution apply to historical reconstruction and live block creation. Reload discards the old runtime and its registrations, then binds the replacement runtime's policies before it emits its session-start lifecycle; extensions must register policies again after reload. Presentation changes do not alter session entries, session JSONL, model context, tool execution, or message data. Extensions still load in RPC, JSON, and print modes, but those non-interactive modes do not consume this interactive presentation policy.
+
+This API does not provide components, renderers, mutable messages, asynchronous policies, grouping, reordering, pagination, or viewport virtualization. Pi retains responsibility for transcript relationships and rendering; use message or entry renderers when an extension owns custom stored content.
 
 ## Follow the extension contracts
 
