@@ -198,6 +198,9 @@ describe("tool row presentation extension", () => {
 
 		runner.setExtensionSettingValue(MODE_KEY, "compact");
 		expect(runner.resolveTranscriptPresentation(block("tool"))).toEqual({ density: "summary" });
+		expect(runner.resolveTranscriptPresentation(block("thinking", "orphaned-thinking-placeholder"))).toEqual({
+			density: "full",
+		});
 
 		runner.setExtensionSettingValue(MODE_KEY, "hidden");
 		expect(runner.resolveTranscriptPresentation(block("tool"))).toEqual({ density: "hidden" });
