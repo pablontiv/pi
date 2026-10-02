@@ -2,6 +2,7 @@
  * Extension system for lifecycle events and custom tools.
  */
 
+export type { SettingsScope } from "../settings-manager.ts";
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
 export {
@@ -88,6 +89,9 @@ export type {
 	ExtensionMode,
 	// Runtime
 	ExtensionRuntime,
+	ExtensionSettingChoice,
+	ExtensionSettingDefinition,
+	ExtensionSettingHandle,
 	ExtensionShortcut,
 	ExtensionToolContext,
 	ExtensionUIContext,
