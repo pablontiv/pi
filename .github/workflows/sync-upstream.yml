@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    outputs:
+      main_sha: ${{ steps.sync.outputs.main_sha }}
     steps:
       - name: Checkout fork product branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,6 +30,7 @@ jobs:
           persist-credentials: false
 
       - name: Fast-forward fork main from upstream
+        id: sync
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -38,25 +41,26 @@ jobs:
 
           fork_main="$(git rev-parse refs/remotes/origin/main)"
           upstream_main="$(git rev-parse refs/remotes/upstream/main)"
+          echo "main_sha=${upstream_main}" >> "${GITHUB_OUTPUT}"
           if [[ "${fork_main}" == "${upstream_main}" ]]; then
             echo "Fork main is already current at ${fork_main}."
-            exit 0
-          fi
-          if ! git merge-base --is-ancestor "${fork_main}" "${upstream_main}"; then
+          elif git merge-base --is-ancestor "${fork_main}" "${upstream_main}"; then
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "${upstream_main}:refs/heads/main"
+          else
             echo "::error::Fork main diverged from upstream; refusing a non-fast-forward update."
             exit 1
           fi
 
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "${upstream_main}:refs/heads/main"
-
-  report-product-drift:
+  sync-dev:
     if: ${{ github.repository == 'pablontiv/pi' }}
     needs: sync-main
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 75
     permissions:
-      contents: read
+      actions: write
+      checks: read
+      contents: write
     steps:
       - name: Checkout Pion product branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,20 +69,116 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Report upstream drift
+      - name: Create merge candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags https://github.com/earendil-works/pi.git \
-            +refs/heads/main:refs/remotes/upstream/main
-          read -r behind ahead <<EOF
-          $(git rev-list --left-right --count refs/remotes/upstream/main...HEAD)
-          EOF
-          {
-            echo "## Pion upstream drift"
-            echo
-            echo "- Upstream commits awaiting rebase: ${behind}"
-            echo "- Pion-only commits: ${ahead}"
-          } >> "${GITHUB_STEP_SUMMARY}"
-          if (( behind > 0 )); then
-            echo "::warning::dev is ${behind} commit(s) behind upstream; rebase and validate."
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/dev:refs/remotes/origin/dev
+
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          dev_sha="$(git rev-parse refs/remotes/origin/dev)"
+          if [[ "${main_sha}" != "${SYNCED_MAIN_SHA}" ]]; then
+            echo "::error::main changed after upstream sync; retry on the next run."
+            exit 1
           fi
+          if git merge-base --is-ancestor "${main_sha}" "${dev_sha}"; then
+            echo "dev already contains main at ${main_sha}."
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --detach "${dev_sha}"
+          git merge --no-ff --no-edit "${main_sha}"
+
+          candidate_sha="$(git rev-parse HEAD)"
+          candidate_branch="local/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${candidate_sha}:refs/heads/${candidate_branch}"
+
+          {
+            echo "changed=true"
+            echo "dev_sha=${dev_sha}"
+            echo "main_sha=${main_sha}"
+            echo "candidate_sha=${candidate_sha}"
+            echo "candidate_branch=${candidate_branch}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Run CI on merge candidate
+        if: ${{ steps.candidate.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.candidate_branch }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${CANDIDATE_BRANCH}"
+
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id="$(
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml \
+                --branch "${CANDIDATE_BRANCH}" --event workflow_dispatch --limit 20 \
+                --json databaseId,headSha \
+              | jq -r --arg sha "${CANDIDATE_SHA}" \
+                '.[] | select(.headSha == $sha) | .databaseId' \
+              | head -n 1
+            )"
+            [[ -z "${run_id}" ]] || break
+            sleep 5
+          done
+          if [[ -z "${run_id}" ]]; then
+            echo "::error::Timed out waiting for candidate CI to start."
+            exit 1
+          fi
+
+          gh run watch "${run_id}" --repo "${GITHUB_REPOSITORY}" --exit-status
+          checks="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${CANDIDATE_SHA}/check-runs?filter=latest&per_page=100")"
+          for name in build-check-test mcp-conformance; do
+            jq -e --arg name "${name}" \
+              'any(.check_runs[]; .name == $name and .status == "completed" and .conclusion == "success" and .app.id == 15368)' \
+              <<< "${checks}" > /dev/null
+          done
+
+      - name: Promote tested candidate to dev
+        if: ${{ steps.candidate.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_DEV_SHA: ${{ steps.candidate.outputs.dev_sha }}
+          SYNCED_MAIN_SHA: ${{ steps.candidate.outputs.main_sha }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            +refs/heads/dev:refs/remotes/origin/dev
+
+          [[ "$(git rev-parse refs/remotes/origin/dev)" == "${ORIGINAL_DEV_SHA}" ]]
+          [[ "$(git rev-parse "${CANDIDATE_SHA}^1")" == "${ORIGINAL_DEV_SHA}" ]]
+          [[ "$(git rev-parse "${CANDIDATE_SHA}^2")" == "${SYNCED_MAIN_SHA}" ]]
+          git merge-base --is-ancestor "${ORIGINAL_DEV_SHA}" "${CANDIDATE_SHA}"
+          git merge-base --is-ancestor "${SYNCED_MAIN_SHA}" "${CANDIDATE_SHA}"
+
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${CANDIDATE_SHA}:refs/heads/dev"
+          {
+            echo "## Pion updated from upstream"
+            echo
+            echo "- main: ${SYNCED_MAIN_SHA}"
+            echo "- previous dev: ${ORIGINAL_DEV_SHA}"
+            echo "- new dev: ${CANDIDATE_SHA}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Remove merge candidate branch
+        if: ${{ always() && steps.candidate.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.candidate_branch }}
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            --delete "refs/heads/${CANDIDATE_BRANCH}"

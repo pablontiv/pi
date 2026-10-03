@@ -43,7 +43,7 @@ const UPSTREAM_ONLY_JOBS = {
   "remove-inprogress-on-close.yml": ["remove-label"],
 };
 const FORK_ONLY_JOBS = {
-  "sync-upstream.yml": ["sync-main", "report-product-drift"],
+  "sync-upstream.yml": ["sync-main", "sync-dev"],
 };
 const SCHEDULE_GUARD_EXEMPT_WORKFLOWS = new Set(["npm-audit.yml"]);
 const REQUIRED_CODEOWNERS = [
