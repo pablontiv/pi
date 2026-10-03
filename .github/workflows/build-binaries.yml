@@ -26,6 +26,7 @@ jobs:
   # a draft release first; cleanup removes the draft if later publishing fails.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -46,7 +47,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: "22.19.0"
           registry-url: 'https://registry.npmjs.org'
 
       - name: Hydrate release model data
@@ -130,6 +131,7 @@ jobs:
 
   smoke-test-binaries:
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     needs: build
     strategy:
       fail-fast: false
@@ -162,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          runtime_platform="$(node -p '`${process.platform}-${process.arch}`')"
+          runtime_platform="$(node -p 'process.platform + "-" + process.arch')"
           case "${runtime_platform}" in
             darwin-arm64|darwin-x64|linux-arm64|linux-x64)
               platform="${runtime_platform}"
@@ -190,8 +192,11 @@ jobs:
 
           mkdir -p extracted
           if [[ "${archive}" == *.zip ]]; then
-            export ARCHIVE_PATH="$(cygpath -w "${archive}")"
-            export DESTINATION_PATH="$(cygpath -w extracted)"
+            ARCHIVE_PATH="$(cygpath -w "${archive}")"
+            DESTINATION_PATH="$(cygpath -w extracted)"
+            export ARCHIVE_PATH DESTINATION_PATH
+            # PowerShell, not Bash, expands the $env variables.
+            # shellcheck disable=SC2016
             powershell.exe -NoProfile -NonInteractive -Command \
               'Expand-Archive -LiteralPath $env:ARCHIVE_PATH -DestinationPath $env:DESTINATION_PATH -Force'
           else
@@ -209,9 +214,11 @@ jobs:
 
   stage-github-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs:
       - build
       - smoke-test-binaries
+    if: ${{ github.repository == 'earendil-works/pi' }}
     permissions:
       actions: read
       contents: write
@@ -303,7 +310,9 @@ jobs:
 
   publish-npm:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: stage-github-release
+    if: ${{ github.repository == 'earendil-works/pi' }}
     environment: npm-publish
     permissions:
       contents: read
@@ -321,7 +330,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: "22.19.0"
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
@@ -329,7 +338,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
-          sudo ln -s $(which fdfind) /usr/local/bin/fd
+          sudo ln -s "$(which fdfind)" /usr/local/bin/fd
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -356,7 +365,9 @@ jobs:
 
   announce-pi-dev-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: publish-npm
+    if: ${{ github.repository == 'earendil-works/pi' }}
     environment: pi-model-upload
     concurrency:
       group: announce-pi-dev-release
@@ -381,7 +392,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: "22.19.0"
 
       - name: Verify AWS CLI
         run: aws --version
@@ -397,10 +408,12 @@ jobs:
 
   publish-github-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs:
       - stage-github-release
       - publish-npm
       - announce-pi-dev-release
+    if: ${{ github.repository == 'earendil-works/pi' }}
     permissions:
       contents: write
     env:
@@ -427,13 +440,14 @@ jobs:
 
   cleanup-draft-github-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs:
       - build
       - stage-github-release
       - publish-npm
       - announce-pi-dev-release
       - publish-github-release
-    if: ${{ always() && needs.stage-github-release.result != 'skipped' && (needs.stage-github-release.result != 'success' || needs.publish-npm.result != 'success' || needs.announce-pi-dev-release.result != 'success' || needs.publish-github-release.result != 'success') }}
+    if: ${{ github.repository == 'earendil-works/pi' && always() && needs.stage-github-release.result != 'skipped' && (needs.stage-github-release.result != 'success' || needs.publish-npm.result != 'success' || needs.announce-pi-dev-release.result != 'success' || needs.publish-github-release.result != 'success') }}
     permissions:
       contents: write
     env:

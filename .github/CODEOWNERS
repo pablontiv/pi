@@ -1,0 +1,20 @@
+* @pablontiv
+
+# Security-sensitive repository controls.
+/.github/** @pablontiv
+/.gitignore @pablontiv
+/.husky/** @pablontiv
+/.npmrc @pablontiv
+/CONTRIBUTING.md @pablontiv
+/LICENSE @pablontiv
+/SECURITY.md @pablontiv
+/package.json @pablontiv
+/package-lock.json @pablontiv
+/packages/**/package.json @pablontiv
+/packages/**/package-lock.json @pablontiv
+/packages/**/npm-shrinkwrap.json @pablontiv
+/scripts/security/** @pablontiv
+/scripts/check-* @pablontiv
+/scripts/release-* @pablontiv
+/scripts/publish-* @pablontiv
+/scripts/*install-lock* @pablontiv

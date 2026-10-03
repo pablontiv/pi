@@ -1,12 +1,22 @@
 name: PR Gate
 
 on:
+  # This trusted-base workflow only reads the pull request metadata through the API;
+  # it never checks out or executes the pull request head.
   pull_request_target:
     types: [opened]
 
+permissions: {}
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   check-contributor:
+    if: ${{ github.repository == 'earendil-works/pi' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write

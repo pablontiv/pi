@@ -1,0 +1,84 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-main:
+    if: ${{ github.repository == 'pablontiv/pi' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout fork product branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: local/tool-row-visibility
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward fork main from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags https://github.com/earendil-works/pi.git \
+            +refs/heads/main:refs/remotes/upstream/main
+
+          fork_main="$(git rev-parse refs/remotes/origin/main)"
+          upstream_main="$(git rev-parse refs/remotes/upstream/main)"
+          if [[ "${fork_main}" == "${upstream_main}" ]]; then
+            echo "Fork main is already current at ${fork_main}."
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "${fork_main}" "${upstream_main}"; then
+            echo "::error::Fork main diverged from upstream; refusing a non-fast-forward update."
+            exit 1
+          fi
+
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${upstream_main}:refs/heads/main"
+
+  report-product-drift:
+    if: ${{ github.repository == 'pablontiv/pi' }}
+    needs: sync-main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Pion product branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: local/tool-row-visibility
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Report upstream drift
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/earendil-works/pi.git \
+            +refs/heads/main:refs/remotes/upstream/main
+          read -r behind ahead <<EOF
+          $(git rev-list --left-right --count refs/remotes/upstream/main...HEAD)
+          EOF
+          {
+            echo "## Pion upstream drift"
+            echo
+            echo "- Upstream commits awaiting rebase: ${behind}"
+            echo "- Pion-only commits: ${ahead}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if (( behind > 0 )); then
+            echo "::warning::local/tool-row-visibility is ${behind} commit(s) behind upstream; rebase and validate per ADR 0004."
+          fi

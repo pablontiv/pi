@@ -48,6 +48,7 @@ jobs:
   pin:
     if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     outputs:
@@ -62,7 +63,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: "22.19.0"
 
       - name: Refresh the model catalog pin if stale
         id: pin
@@ -85,6 +86,7 @@ jobs:
 
   build:
     needs: pin
+    timeout-minutes: 45
     # After a catalog publication, only build when the pin changed.
     if: ${{ github.event_name != 'workflow_run' || needs.pin.outputs.updated == 'true' }}
     strategy:
@@ -134,25 +136,31 @@ jobs:
 
   update-stable:
     needs: build
-    if: ${{ github.ref_type == 'tag' }}
+    if: ${{ github.repository == 'earendil-works/pi' && github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Without --force, the push fails unless it is a fast-forward, so stable
       # never moves back to an older release.
       - name: Fast-forward stable to the release
-        run: git push origin "${GITHUB_SHA}:refs/heads/stable"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${GITHUB_SHA}:refs/heads/stable"
 
   commit-pin:
     needs:
       - pin
       - build
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.pin.outputs.updated == 'true' }}
+    if: ${{ github.repository == 'earendil-works/pi' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.pin.outputs.updated == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -160,9 +168,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
+          persist-credentials: false
 
       - name: Commit and push the model catalog pin
         env:
+          GH_TOKEN: ${{ github.token }}
           REVISION: ${{ needs.pin.outputs.revision }}
         run: |
           set -euo pipefail
@@ -176,7 +186,7 @@ jobs:
           fi
           git commit -m "chore: update Nix model catalog pin"
           for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
+            if git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
               exit 0
             fi
             sleep $((attempt * 5))

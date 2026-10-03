@@ -4,18 +4,26 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
+concurrency:
+  group: approve-contributor-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   approve:
+    if: ${{ github.repository == 'earendil-works/pi' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
       issues: write
-      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Update contributor approval
         id: update
@@ -175,12 +183,14 @@ jobs:
 
       - name: Commit and push
         if: steps.update.outputs.status == 'changed'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/APPROVED_CONTRIBUTORS
           git diff --staged --quiet || git commit -m "chore: approve contributors from issue #${{ github.event.issue.number }}"
-          git push
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${{ github.event.repository.default_branch }}"
 
       - name: Comment on issue
         if: steps.update.outputs.status == 'changed' || steps.update.outputs.status == 'already'

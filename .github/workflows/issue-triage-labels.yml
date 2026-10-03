@@ -4,9 +4,17 @@ on:
   issues:
     types: [reopened, labeled]
 
+permissions: {}
+
+concurrency:
+  group: issue-triage-labels-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   update-labels:
+    if: ${{ github.repository == 'earendil-works/pi' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       issues: write
     steps:

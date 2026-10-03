@@ -12,8 +12,37 @@ packages/ai/src/providers/data/
 packages/ai/src/providers/.model-generation-*/
 *.cpuprofile
 
-# Environment
+# Environment and local credentials
 .env
+.env.*
+!.env.example
+!.env.*.example
+.pypirc
+.netrc
+.authinfo
+
+# Private keys, certificates, keystores, and decrypted secrets
+*.agekey
+*.dec.*
+*.decrypted.*
+*.plaintext.*
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+credentials.*.json
+service-account*.json
 
 # Editor files
 .vscode/

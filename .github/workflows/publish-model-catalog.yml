@@ -35,10 +35,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: publish-model-catalog-${{ github.event.pull_request.number || github.ref || github.event_name }}
+  cancel-in-progress: false
+
 jobs:
   generate:
     if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       SOURCE_REF: ${{ github.event.workflow_run.head_sha || inputs.source_ref || github.sha }}
     steps:
@@ -51,7 +56,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: "22.19.0"
           cache: npm
 
       - name: Install dependencies
@@ -72,9 +77,10 @@ jobs:
           retention-days: 14
 
   publish:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    if: ${{ github.repository == 'earendil-works/pi' && (github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
     needs: generate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: pi-model-upload
     concurrency:
       group: publish-model-catalog-r2
@@ -96,7 +102,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: "22.19.0"
 
       - name: Download model catalog JSON
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

@@ -4,9 +4,17 @@ on:
   issues:
     types: [closed]
 
+permissions: {}
+
+concurrency:
+  group: remove-inprogress-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   remove-label:
+    if: ${{ github.repository == 'earendil-works/pi' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       issues: write
     steps:
