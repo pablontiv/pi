@@ -40,6 +40,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolRendererResolver,
 	TranscriptPresentationPolicyRegistration,
 } from "./types.ts";
 
@@ -441,6 +442,12 @@ function createExtensionAPI(
 					runtime.invalidateTranscriptPresentation();
 				},
 			};
+		},
+
+		registerToolRenderer(resolver: ToolRendererResolver): void {
+			assertActive();
+			extension.toolRenderers ??= [];
+			extension.toolRenderers.push(resolver);
 		},
 
 		// Flag access - checks extension registered it, reads from runtime
