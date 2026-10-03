@@ -33,6 +33,7 @@ jobs:
         id: sync
         env:
           GH_TOKEN: ${{ github.token }}
+          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -45,8 +46,15 @@ jobs:
           if [[ "${fork_main}" == "${upstream_main}" ]]; then
             echo "Fork main is already current at ${fork_main}."
           elif git merge-base --is-ancestor "${fork_main}" "${upstream_main}"; then
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "${upstream_main}:refs/heads/main"
+            [[ -n "${PION_SYNC_DEPLOY_KEY}" ]]
+            key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
+            known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
+            trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
+            printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
+            chmod 0600 "${key_path}"
+            gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
+            GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
+              git push "git@github.com:${GITHUB_REPOSITORY}.git" "${upstream_main}:refs/heads/main"
           else
             echo "::error::Fork main diverged from upstream; refusing a non-fast-forward update."
             exit 1
