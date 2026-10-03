@@ -631,8 +631,7 @@ export class InteractiveMode {
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
-			this.clearPendingBashComponents();
-			this.resetExtensionUI();
+			this.teardownSessionBoundary();
 		});
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
@@ -2201,6 +2200,32 @@ export class InteractiveMode {
 		if (message.stopReason !== "error" || isRetryableAssistantError(message)) return;
 		if (/\b(?:abort(?:ed)?|cancel(?:l?ed)?)\b/i.test(message.errorMessage ?? "")) return;
 		this.suggestBugReport();
+	}
+
+	private teardownSessionBoundary(options: { preservePendingBash?: boolean; resetExtensionUI?: boolean } = {}): void {
+		this.transcriptPresentationInvalidationUnsubscribe?.();
+		this.transcriptPresentationInvalidationUnsubscribe = undefined;
+		if (!options.preservePendingBash) this.clearPendingBashComponents();
+		this.chatContainer.clear();
+		this.pendingMessagesContainer.clear();
+		this.presentedComponents.clear();
+		this.pendingTools.clear();
+		this.toolComponents.clear();
+		this.assistantMessageComponents.clear();
+		this.outputPaddingComponents.clear();
+		this.expandableTranscriptComponents.clear();
+		if (!options.preservePendingBash) {
+			this.pendingBashComponents = [];
+			this.pendingBashMessages.clear();
+			this.bashComponent = undefined;
+		}
+		this.streamingComponent = undefined;
+		this.streamingMessage = undefined;
+		this.entriesRenderedByBoundaryCompaction.clear();
+		this.lastStatusSpacer = undefined;
+		this.lastStatusText = undefined;
+		this.lastStatusMessage = "";
+		if (options.resetExtensionUI !== false) this.resetExtensionUI();
 	}
 
 	private renderCurrentSessionState(): void {
@@ -3996,6 +4021,10 @@ export class InteractiveMode {
 				const retainedPresentation = retainedComponent
 					? this.presentedComponents.get(retainedComponent)
 					: undefined;
+				if (retainedComponent && !retainedPresentation) {
+					this.addBashExecutionComponent(retainedComponent);
+					break;
+				}
 				if (retainedPresentation) {
 					this.pendingMessagesContainer.removeChild(retainedPresentation);
 					if (!this.chatContainer.children.includes(retainedPresentation)) {
@@ -4157,7 +4186,7 @@ export class InteractiveMode {
 
 		for (const component of this.pendingBashComponents) {
 			const identity = this.pendingBashMessages.get(component);
-			if (!identity || !this.presentedComponents.has(component)) continue;
+			if (!identity) continue;
 			pendingById.set(identity.id, component);
 		}
 
@@ -6708,7 +6737,11 @@ export class InteractiveMode {
 		};
 
 		try {
-			await this.session.reload({ beforeSessionStart: restoreChatBeforeSessionStart });
+			await this.session.reload({
+				beforeSessionInvalidate: () =>
+					this.teardownSessionBoundary({ preservePendingBash: true, resetExtensionUI: false }),
+				beforeSessionStart: restoreChatBeforeSessionStart,
+			});
 			restoreChatBeforeSessionStart();
 			this.keybindings.reload();
 			const activeHeader = this.customHeader ?? this.builtInHeader;

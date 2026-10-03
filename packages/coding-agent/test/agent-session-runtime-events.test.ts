@@ -114,6 +114,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];
+		let boundaryTeardowns = 0;
 		const { runtimeHost } = await createRuntimeHost((pi) => {
 			pi.on("session_before_switch", (event) => {
 				events.push(event);
@@ -128,6 +129,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(events).toEqual([{ type: "session_start", reason: "startup" }]);
 		events.length = 0;
+		runtimeHost.setBeforeSessionInvalidate(() => {
+			boundaryTeardowns++;
+		});
 
 		await runtimeHost.session.prompt("hello");
 		const originalSessionFile = runtimeHost.session.sessionFile;
@@ -135,6 +139,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const newSessionResult = await runtimeHost.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
+		expect(boundaryTeardowns).toBe(1);
 		await runtimeHost.session.bindExtensions({});
 		const secondSessionFile = runtimeHost.session.sessionFile;
 		expect(events).toEqual([
@@ -148,6 +153,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const switchResult = await runtimeHost.switchSession(originalSessionFile!);
 		expect(switchResult.cancelled).toBe(false);
+		expect(boundaryTeardowns).toBe(2);
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
@@ -209,6 +215,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	it("emits session_before_fork and session_start and honors cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelNextFork = false;
+		let boundaryTeardowns = 0;
 		const { runtimeHost } = await createRuntimeHost((pi) => {
 			pi.on("session_before_fork", (event) => {
 				events.push(event);
@@ -227,6 +234,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(events).toEqual([{ type: "session_start", reason: "startup" }]);
 		events.length = 0;
+		runtimeHost.setBeforeSessionInvalidate(() => {
+			boundaryTeardowns++;
+		});
 
 		await runtimeHost.session.prompt("hello");
 		const userMessage = runtimeHost.session.getUserMessagesForForking()[0];
@@ -234,6 +244,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const successResult = await runtimeHost.fork(userMessage.entryId);
 		expect(successResult.cancelled).toBe(false);
+		expect(boundaryTeardowns).toBe(1);
 		expect(successResult.selectedText).toBe("hello");
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([

@@ -55,7 +55,10 @@ type ReloadCommandContext = {
 	session: {
 		isStreaming: boolean;
 		isCompacting: boolean;
-		reload: (options?: { beforeSessionStart?: () => void | Promise<void> }) => Promise<void>;
+		reload: (options?: {
+			beforeSessionInvalidate?: () => void;
+			beforeSessionStart?: () => void | Promise<void>;
+		}) => Promise<void>;
 		resourceLoader: { getThemes: () => { themes: [] } };
 		extensionRunner: unknown;
 		modelRegistry: { getError: () => string | undefined };
@@ -83,6 +86,7 @@ type ReloadCommandContext = {
 	defaultEditor: { setPaddingX: (padding: number) => void; setAutocompleteMaxVisible: (maxVisible: number) => void };
 	themeController: { applyFromSettings: () => Promise<void> };
 	resetExtensionUI: () => void;
+	teardownSessionBoundary: (options?: { preservePendingBash?: boolean; resetExtensionUI?: boolean }) => void;
 	bindTranscriptPresentationInvalidation: () => void;
 	rebuildChatFromMessages: () => void;
 	setupAutocompleteProvider: () => void;
@@ -120,12 +124,14 @@ type ReloadCommandContextOverrides = Omit<
 
 function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {}): ReloadCommandContext {
 	const editor = overrides.editor ?? {};
+	const resetExtensionUI = overrides.resetExtensionUI ?? vi.fn();
 	return {
 		hideThinkingBlock: overrides.hideThinkingBlock ?? false,
 		session: {
 			isStreaming: false,
 			isCompacting: false,
 			reload: async (options) => {
+				options?.beforeSessionInvalidate?.();
 				await options?.beforeSessionStart?.();
 			},
 			resourceLoader: { getThemes: () => ({ themes: [] }) },
@@ -157,7 +163,10 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		themeController: { applyFromSettings: async () => {}, ...overrides.themeController },
 		customHeader: overrides.customHeader,
 		builtInHeader: overrides.builtInHeader,
-		resetExtensionUI: overrides.resetExtensionUI ?? (() => {}),
+		resetExtensionUI,
+		teardownSessionBoundary: (options) => {
+			if (options?.resetExtensionUI !== false) resetExtensionUI();
+		},
 		bindTranscriptPresentationInvalidation: overrides.bindTranscriptPresentationInvalidation ?? (() => {}),
 		rebuildChatFromMessages: overrides.rebuildChatFromMessages ?? (() => {}),
 		setupAutocompleteProvider: overrides.setupAutocompleteProvider ?? (() => {}),
@@ -445,7 +454,9 @@ describe("regression #5943: session_start transient UI", () => {
 	it("keeps the reload blocker focused until async reload completes", async () => {
 		initTheme("dark", false);
 		const editor = {};
+		const resetExtensionUI = vi.fn();
 		let focused: unknown;
+		let editorContainerChild: unknown;
 		let chatRestored = false;
 		let markReloadWaiting!: () => void;
 		let finishReload!: () => void;
@@ -460,11 +471,19 @@ describe("regression #5943: session_start transient UI", () => {
 			editor,
 			session: {
 				reload: async (options) => {
-					await options?.beforeSessionStart?.();
+					options?.beforeSessionInvalidate?.();
 					markReloadWaiting();
 					await reloadFinished;
+					await options?.beforeSessionStart?.();
 				},
 			},
+			editorContainer: {
+				clear: () => {},
+				addChild: (component) => {
+					editorContainerChild = component;
+				},
+			},
+			resetExtensionUI,
 			ui: {
 				setFocus: (component) => {
 					focused = component;
@@ -478,12 +497,17 @@ describe("regression #5943: session_start transient UI", () => {
 		const reloadPromise = interactiveModePrototype.handleReloadCommand.call(context);
 		await reloadWaiting;
 
-		expect(chatRestored).toBe(true);
+		expect(chatRestored).toBe(false);
+		expect(resetExtensionUI).toHaveBeenCalledTimes(1);
 		expect(focused).not.toBe(editor);
+		expect(editorContainerChild).toBe(focused);
+		expect(editorContainerChild).not.toBe(editor);
 
 		finishReload();
 		await reloadPromise;
 
+		expect(chatRestored).toBe(true);
+		expect(resetExtensionUI).toHaveBeenCalledTimes(1);
 		expect(focused).toBe(editor);
 	});
 });

@@ -4,7 +4,8 @@ import type { Component, Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { AgentSessionRuntime, type CreateAgentSessionRuntimeResult } from "../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import type {
 	TranscriptBlockDescriptor,
 	TranscriptDensity,
@@ -33,6 +34,14 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 	}
 	throw new Error("Timed out waiting for interactive transcript state");
+}
+
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
 }
 
 type InteractiveInternals = {
@@ -616,6 +625,50 @@ describe("interactive transcript presentation integration", () => {
 		}
 	});
 
+	it("does not render a stale transcript wrapper while runtime replacement is awaiting its factory", async () => {
+		const oldHarness = await createHarnessWithExtensions({ responses: ["old"] });
+		harnesses.push(oldHarness);
+		await oldHarness.session.bindExtensions({});
+		const replacementHarness = await createHarnessWithExtensions({ responses: ["replacement"] });
+		harnesses.push(replacementHarness);
+		await replacementHarness.session.bindExtensions({});
+
+		const factoryResult = createDeferred<CreateAgentSessionRuntimeResult>();
+		const factoryEntered = createDeferred<void>();
+		const services = { cwd: oldHarness.tempDir, agentDir: oldHarness.tempDir } as AgentSessionServices;
+		const runtime = new AgentSessionRuntime(oldHarness.session, services, async () => {
+			factoryEntered.resolve();
+			return factoryResult.promise;
+		});
+		const mode = new InteractiveMode(runtime, {
+			terminal: new VirtualTerminal(100, 30),
+		}) as unknown as InteractiveInternals;
+		runtime.setRebindSession(async () => {});
+		mode.bindTranscriptPresentationInvalidation();
+		mode.renderSessionItems([{ role: "user", content: "old session", timestamp: Date.now() }]);
+		mode.chatContainer.render(100);
+		const oldWrapper = [...mode.presentedComponents.values()][0];
+		if (!oldWrapper) throw new Error("Expected an old-session transcript wrapper");
+
+		const replacement = runtime.newSession();
+		await factoryEntered.promise;
+
+		expect(mode.presentedComponents.size).toBe(0);
+		expect(mode.chatContainer.children).not.toContain(oldWrapper);
+		expect(() => mode.chatContainer.render(100)).not.toThrow();
+
+		factoryResult.resolve({
+			session: replacementHarness.session,
+			extensionsResult: replacementHarness.session.resourceLoader.getExtensions(),
+			services,
+			diagnostics: [],
+		});
+		await replacement;
+		mode.bindTranscriptPresentationInvalidation();
+		mode.renderSessionItems([{ role: "user", content: "replacement session", timestamp: Date.now() }]);
+		expect(normalized(mode.chatContainer)).toContain("replacement session");
+	});
+
 	it("drops prior-session pending bash identity at the runtime session boundary before rebuilding", async () => {
 		let beforeSessionInvalidate = () => {};
 		const harness = await createHarnessWithExtensions({
@@ -673,6 +726,55 @@ describe("interactive transcript presentation integration", () => {
 		mode.flushPendingBashComponents();
 		expect(mode.chatContainer.children).not.toContain(oldWrapper);
 		expect(normalized(mode.chatContainer)).not.toContain("OLD_SESSION_PENDING_BASH_OUTPUT");
+	});
+
+	it("preserves pending bash identity and rebuilds its wrapper across same-session reload", async () => {
+		const harness = await createHarnessWithExtensions({
+			settings: { quietStartup: true },
+			responses: [{ text: "RELOAD_ASSISTANT_FINISHED", delayMs: 50 }],
+			extensionFactories: [
+				{
+					path: "<reload-pending-bash>",
+					factory: (pi) => {
+						pi.registerTranscriptPresentationPolicy(() => ({ density: "full" }));
+						pi.on("user_bash", async () => ({
+							result: {
+								output: "RELOAD_PENDING_BASH_OUTPUT",
+								exitCode: 0,
+								cancelled: false,
+								truncated: false,
+							},
+						}));
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const mode = createInteractive(harness);
+		mode.subscribeToAgent();
+
+		const prompt = harness.session.prompt("reload with pending bash");
+		await waitUntil(() => harness.session.isStreaming);
+		await mode.handleBashCommand("retained across reload");
+		const pendingBash = mode.pendingBashComponents[0];
+		if (!pendingBash) throw new Error("Expected a pending bash component");
+		const oldWrapper = mode.presentedComponents.get(pendingBash);
+		if (!oldWrapper) throw new Error("Expected the old pending bash wrapper");
+		await prompt;
+		const pendingMessageId = mode.pendingBashMessages.get(pendingBash)?.id;
+		if (!pendingMessageId) throw new Error("Expected persisted pending bash identity");
+
+		await mode.handleReloadCommand();
+
+		const newWrapper = mode.presentedComponents.get(pendingBash);
+		expect(newWrapper).toBeDefined();
+		expect(newWrapper).not.toBe(oldWrapper);
+		expect(mode.pendingBashComponents).toEqual([pendingBash]);
+		expect(mode.pendingBashMessages.get(pendingBash)?.id).toBe(pendingMessageId);
+		expect(mode.chatContainer.children).not.toContain(oldWrapper);
+		expect(normalized(mode.chatContainer)).toContain("RELOAD_PENDING_BASH_OUTPUT");
+		expect(() => newWrapper?.render(100)).not.toThrow();
 	});
 
 	it("does not report a delayed old-session bash rejection in replacement UI", async () => {
@@ -815,6 +917,12 @@ describe("interactive transcript presentation integration", () => {
 			} as unknown as AgentSessionRuntime,
 			{ terminal: new VirtualTerminal(100, 30) },
 		) as unknown as InteractiveInternals;
+		const originalRunnerInvalidate = oldRunner.invalidate.bind(oldRunner);
+		vi.spyOn(oldRunner, "invalidate").mockImplementation((message) => {
+			originalRunnerInvalidate(message);
+			ordering.push("render-after-old-invalidation");
+			expect(() => mode.chatContainer.render(100)).not.toThrow();
+		});
 		const originalInvalidate = mode.chatContainer.invalidate.bind(mode.chatContainer);
 		vi.spyOn(mode.chatContainer, "invalidate").mockImplementation(() => {
 			if (duringReloadSessionStart) ordering.push("replacement-invalidation");
@@ -830,9 +938,19 @@ describe("interactive transcript presentation integration", () => {
 
 			expect(harness.session.extensionRunner).not.toBe(oldRunner);
 			expect(ordering).toEqual(
-				expect.arrayContaining(["old-runner-detached", "replacement-session-start", "replacement-invalidation"]),
+				expect.arrayContaining([
+					"old-runner-detached",
+					"render-after-old-invalidation",
+					"replacement-session-start",
+					"replacement-invalidation",
+				]),
 			);
-			expect(ordering.indexOf("old-runner-detached")).toBeLessThan(ordering.indexOf("replacement-session-start"));
+			expect(ordering.indexOf("old-runner-detached")).toBeLessThan(
+				ordering.indexOf("render-after-old-invalidation"),
+			);
+			expect(ordering.indexOf("render-after-old-invalidation")).toBeLessThan(
+				ordering.indexOf("replacement-session-start"),
+			);
 			expect(ordering.indexOf("replacement-session-start")).toBeLessThan(
 				ordering.indexOf("replacement-invalidation"),
 			);
