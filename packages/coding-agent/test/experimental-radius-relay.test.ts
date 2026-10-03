@@ -114,6 +114,7 @@ describe("experimental Radius relay", () => {
 		const received: Uint8Array[] = [];
 		let accepted:
 			| {
+					readonly allowLocalFilesystemAccess: boolean;
 					send(chunk: Uint8Array): Promise<void>;
 					close(finalChunk?: Uint8Array): Promise<void>;
 			  }
@@ -145,7 +146,7 @@ describe("experimental Radius relay", () => {
 		await vi.waitFor(() => expect(statuses).toContain("connected"));
 
 		socket.message(JSON.stringify({ version: 1, type: "connection_open", connection_id: connectionId }));
-		expect(accepted).toBeDefined();
+		expect(accepted?.allowLocalFilesystemAccess).toBe(false);
 		const fromClient = Uint8Array.from([1, 2, 3]);
 		socket.message(encodeRelayDataFrame(connectionId, fromClient));
 		expect(received.map((chunk) => [...chunk])).toEqual([[1, 2, 3]]);

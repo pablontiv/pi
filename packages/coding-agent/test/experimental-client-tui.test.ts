@@ -135,8 +135,9 @@ describe("experimental client TUI", () => {
 				},
 				source: reloadSource,
 			};
+			const initialData = createPresentationFacetData([]);
 			const reloadData = createPresentationFacetData([reloadArtifact]);
-			const prepareSessionPlugins = vi.fn(async () => reloadData);
+			const prepareSessionPlugins = vi.fn(async () => initialData);
 			const reloadPresentationPlugins = vi.fn(async () => reloadData);
 			const reloadSessionPlugins = vi.fn(async () => {});
 			const serverProvider = new RemoteServiceProvider([SessionDirectory, SessionManagement, PresentationPlugins]);
@@ -284,7 +285,11 @@ describe("experimental client TUI", () => {
 					expect(reloadPresentationPlugins).toHaveBeenCalledOnce();
 					expect(reloadSessionPlugins).toHaveBeenCalledOnce();
 				});
-				await vi.waitFor(() => expect(component.render(80).join("\n")).toContain("Reloaded plugins."));
+				await vi.waitFor(() =>
+					expect(component.render(80).join("\n")).toContain(
+						"Radius servers cannot provide presentation plugin bundles",
+					),
+				);
 
 				publishReplacement(attachment, { status: "detached" });
 				publishReplacement(connectionState, {

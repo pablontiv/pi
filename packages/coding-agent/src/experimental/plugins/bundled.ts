@@ -36,13 +36,16 @@ export function createPresentationFacetData(artifacts: readonly FacetBundleArtif
 }
 
 /** Create local loaders only from artifacts selected and sent by the connected server. */
-export function createPresentationFacetLoaders(data: JsonValue): readonly FacetLoader[] {
+export function createPresentationFacetLoaders(data: JsonValue, transport: "unix" | "radius"): readonly FacetLoader[] {
 	if (data === null || Array.isArray(data) || typeof data !== "object") {
 		throw new Error("Invalid presentation plugin data");
 	}
 	const artifacts = data[PRESENTATION_FACET_BUNDLES_KEY];
 	if (artifacts === undefined) return [];
 	if (!Array.isArray(artifacts)) throw new Error("Invalid presentation plugin bundle list");
+	if (transport === "radius" && artifacts.length > 0) {
+		throw new Error("Radius servers cannot provide presentation plugin bundles");
+	}
 	return artifacts.map((artifact) =>
 		createFacetBundleArtifactLoader({ artifact, resolveExternal: resolvePluginExternal }),
 	);

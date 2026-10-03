@@ -1,9 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { readFacetBundleManifest } from "@earendil-works/chord/node";
+import {
+	FACET_BUNDLE_ARTIFACT_FORMAT,
+	FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
+	type FacetBundleArtifact,
+	readFacetBundleManifest,
+} from "@earendil-works/chord/node";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	activateBuiltinClientServices,
@@ -37,6 +42,31 @@ describe("server-selected presentation facets", () => {
 				pluginPackages: ["./local-plugin"],
 			}),
 		).rejects.toThrow("only be configured on a local Unix server");
+	});
+
+	test("rejects self-consistent Radius presentation artifacts on initial load and reload", () => {
+		const source = 'throw new Error("transported source executed");\n';
+		const artifact: FacetBundleArtifact = {
+			format: FACET_BUNDLE_ARTIFACT_FORMAT,
+			formatVersion: FACET_BUNDLE_ARTIFACT_FORMAT_VERSION,
+			plugin: { id: "remote-plugin" },
+			entryName: "tui",
+			entry: {
+				file: "tui.cjs",
+				integrity: `sha256-${createHash("sha256").update(source).digest("base64")}`,
+				externalImports: [],
+			},
+			source,
+		};
+		const transported = createPresentationFacetData([artifact]);
+
+		expect(() => createPresentationFacetLoaders(transported, "radius")).toThrow(
+			"Radius servers cannot provide presentation plugin bundles",
+		);
+		expect(createPresentationFacetLoaders(createPresentationFacetData([]), "radius")).toEqual([]);
+		expect(() => createPresentationFacetLoaders(transported, "radius")).toThrow(
+			"Radius servers cannot provide presentation plugin bundles",
+		);
 	});
 
 	test("restores plugin package selections for later server generations", async () => {
@@ -80,7 +110,7 @@ describe("server-selected presentation facets", () => {
 			new RegExp(`/plugin-builds/${serverId}/pi-example-plugin-[a-f0-9]{12}/chord-facets\\.json$`, "u"),
 		);
 		expect(first[0]?.plugin).toEqual({ id: "@earendil-works/test-plugin", version: "1.0.0" });
-		const firstLoaded = await createPresentationFacetLoaders(createPresentationFacetData(first))[0]!.load();
+		const firstLoaded = await createPresentationFacetLoaders(createPresentationFacetData(first), "unix")[0]!.load();
 		expect(firstLoaded.facets.map(({ id }) => id)).toEqual(["built-a"]);
 		await firstLoaded.dispose();
 
@@ -90,7 +120,7 @@ describe("server-selected presentation facets", () => {
 		);
 		const second = await plugin.build();
 		expect(second[0]?.source).not.toBe(first[0]?.source);
-		const secondLoaded = await createPresentationFacetLoaders(createPresentationFacetData(second))[0]!.load();
+		const secondLoaded = await createPresentationFacetLoaders(createPresentationFacetData(second), "unix")[0]!.load();
 		expect(secondLoaded.facets.map(({ id }) => id)).toEqual(["built-b"]);
 		await secondLoaded.dispose();
 
@@ -130,7 +160,7 @@ describe("server-selected presentation facets", () => {
 		);
 		await expect(restoreServerPluginPackageProfile(join(directory, "server"), running.serverId)).resolves.toEqual([]);
 		const serverLoaded = await Promise.all(
-			createPresentationFacetLoaders(presentationPlugins).map((loader) => loader.load()),
+			createPresentationFacetLoaders(presentationPlugins, "unix").map((loader) => loader.load()),
 		);
 		expect(serverLoaded.flatMap(({ facets }) => facets.map(({ id }) => id))).toEqual(["built-b", "second-built"]);
 		await Promise.all(serverLoaded.map((loaded) => loaded.dispose()));
@@ -147,7 +177,9 @@ describe("server-selected presentation facets", () => {
 		try {
 			await services.ready(BACKGROUND_CONTEXT);
 			const data = await services.use(PresentationPlugins).reload(BACKGROUND_CONTEXT);
-			const reloaded = await Promise.all(createPresentationFacetLoaders(data).map((loader) => loader.load()));
+			const reloaded = await Promise.all(
+				createPresentationFacetLoaders(data, "unix").map((loader) => loader.load()),
+			);
 			expect(reloaded.flatMap(({ facets }) => facets.map(({ id }) => id))).toEqual(["built-c", "second-built"]);
 			await Promise.all(reloaded.map((loaded) => loaded.dispose()));
 		} finally {
@@ -166,7 +198,7 @@ describe("server-selected presentation facets", () => {
 		const manifest = await readFacetBundleManifest(plugin.manifestPath);
 		expect(manifest.plugin).toEqual({ id: "@earendil-works/pi-example-plugin", version: "1.0.0" });
 		expect(Object.keys(manifest.entries)).toEqual(["session", "tui"]);
-		const loaded = await createPresentationFacetLoaders(createPresentationFacetData(artifacts))[0]!.load();
+		const loaded = await createPresentationFacetLoaders(createPresentationFacetData(artifacts), "unix")[0]!.load();
 		expect(loaded.facets.map(({ id }) => id)).toEqual(["@earendil-works/pi-example-plugin/tui"]);
 		await loaded.dispose();
 	});

@@ -238,14 +238,17 @@ export class ExperimentalClientTui implements Component {
 
 	async #start(prepared: PreparedClientSession): Promise<void> {
 		const server = prepared.server;
+		const presentationPluginTransport = server.radius ? "radius" : "unix";
 		let presentationFacets = await combineFacetLoaders(
-			createPresentationFacetLoaders(prepared.presentationPlugins),
+			createPresentationFacetLoaders(prepared.presentationPlugins, presentationPluginTransport),
 		).load();
 		this.#presentationFacets = presentationFacets;
 		let facetHost!: FacetHost;
 		const reloadPresentationPlugins = (data: JsonValue): Promise<void> => {
 			const operation = this.#facetReloadTail.then(async () => {
-				const candidate = await combineFacetLoaders(createPresentationFacetLoaders(data)).load();
+				const candidate = await combineFacetLoaders(
+					createPresentationFacetLoaders(data, presentationPluginTransport),
+				).load();
 				try {
 					await facetHost.reload(candidate.facets);
 				} catch (error) {

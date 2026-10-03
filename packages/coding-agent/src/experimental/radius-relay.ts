@@ -76,6 +76,7 @@ export type RadiusRelayWebSocketFactory = (options: {
 
 interface RelayByteConnection {
 	readonly closed: boolean;
+	readonly allowLocalFilesystemAccess: boolean;
 	send(chunk: Uint8Array): Promise<void>;
 	close(finalChunk?: Uint8Array): Promise<void>;
 }
@@ -402,6 +403,7 @@ export class RadiusClientReconnect {
 }
 
 class RelayServerByteConnection implements RelayByteConnection {
+	readonly allowLocalFilesystemAccess = false;
 	readonly #sendChunk: (chunk: Uint8Array) => Promise<void>;
 	readonly #closeConnection: (finalChunk?: Uint8Array) => Promise<void>;
 	#closed = false;

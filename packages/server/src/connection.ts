@@ -6,6 +6,8 @@ import type { MaybePromise, RoutedServerServiceAttachment } from "./types.ts";
 /** An established, authorized ordered byte connection. */
 export interface ByteConnection {
 	readonly closed: boolean;
+	/** Whether this connection may request operations against the server's local filesystem. */
+	readonly allowLocalFilesystemAccess?: boolean;
 	send(chunk: Uint8Array): Promise<void>;
 	close(finalChunk?: Uint8Array): MaybePromise<void>;
 }

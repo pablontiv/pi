@@ -271,6 +271,7 @@ export class Server<TMetadata extends SessionMetadata = SessionMetadata> {
 		if (this.closing || state.disconnected || state.stage !== "handshaking" || state.connection.closed) return;
 		const services = await this.host.serverServices.attachClient(
 			{
+				allowLocalFilesystemAccess: state.connection.allowLocalFilesystemAccess === true,
 				attachSession: async (sessionId, context) => {
 					await this.sessions.attachClient(state, sessionId, context);
 				},

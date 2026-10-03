@@ -6,7 +6,11 @@ import {
 	replicatedState,
 } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { RoutedServerServiceAttachment, RoutedServerServiceHost } from "@earendil-works/pi-server";
+import {
+	type RoutedServerServiceAttachment,
+	type RoutedServerServiceHost,
+	ServerError,
+} from "@earendil-works/pi-server";
 import { PresentationPlugins } from "./plugins.ts";
 import {
 	type SessionCreateOptions,
@@ -69,8 +73,14 @@ export async function createExperimentalServerServices(options: {
 				]);
 				provider.provide(SessionDirectory, { state: directory });
 				provider.provide(PresentationPlugins, {
-					prepareSession: ({ sessionId, packagePaths }, context) =>
-						serialize(async () => {
+					prepareSession: ({ sessionId, packagePaths }, context) => {
+						if (packagePaths !== null && !presentation.allowLocalFilesystemAccess) {
+							throw new ServerError(
+								"service_invalid_value",
+								"Remote clients cannot select server plugin package paths",
+							);
+						}
+						return serialize(async () => {
 							const selected = await options.prepareSessionPlugins(
 								sessionId,
 								packagePaths ?? undefined,
@@ -78,7 +88,8 @@ export async function createExperimentalServerServices(options: {
 							);
 							preparedPluginPackagePaths = selected.packagePaths;
 							return selected.presentationPlugins;
-						}),
+						});
+					},
 					reload: (context) =>
 						serialize(() => {
 							if (preparedPluginPackagePaths === undefined) {

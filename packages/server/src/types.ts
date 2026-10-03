@@ -31,6 +31,8 @@ export interface RoutedSessionAttachment {
 
 /** Presentation-scoped routing capabilities available to server service implementations. */
 export interface RoutedServerPresentation {
+	/** Whether this client may request operations against the server's local filesystem. */
+	readonly allowLocalFilesystemAccess: boolean;
 	attachSession(sessionId: string, context: Context): Promise<void>;
 	detachSession(context: Context): Promise<void>;
 	/** Release routed attachments and handles before the application deletes durable metadata. */

@@ -44,6 +44,7 @@ class ControlledSocket extends EventEmitter {
 test("queues a final protocol error behind pending output before closing", async () => {
 	const socket = new ControlledSocket();
 	const connection = new UnixByteConnection(socket as unknown as Socket, 1_000, 64 * 1024);
+	expect(connection.allowLocalFilesystemAccess).toBe(true);
 	const pendingWrite = connection.send(new Uint8Array([1, 2, 3]));
 	await vi.waitFor(() => expect(socket.writableLength).toBe(1));
 	const finalMessage: ServerHelloError = {

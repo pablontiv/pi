@@ -189,6 +189,7 @@ class UnixListener implements ServerListener {
 
 /** @internal Exported only for transport-level verification. */
 export class UnixByteConnection implements ByteConnection {
+	readonly allowLocalFilesystemAccess = true;
 	private readonly socket: Socket;
 	private readonly gracefulCloseTimeoutMs: number;
 	private readonly maxPendingBytes: number;
