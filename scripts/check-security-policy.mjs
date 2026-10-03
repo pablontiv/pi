@@ -294,6 +294,15 @@ export function checkWorkflow(filePath) {
     ) {
       errors.push(`${fileName}: must never push to upstream`);
     }
+    const checkoutRefs = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!/^\s*(?:-\s*)?uses:\s*actions\/checkout@/u.test(lines[index])) continue;
+      const ref = checkoutBlock(lines, index).find((line) => /^\s+ref:\s*\S+\s*(?:#.*)?$/u.test(line));
+      if (ref) checkoutRefs.push(ref.replace(/^\s+ref:\s*/u, "").split(/\s+#/u, 1)[0]);
+    }
+    if (checkoutRefs.length !== 2 || checkoutRefs.some((ref) => unquote(ref) !== "dev")) {
+      errors.push(`${fileName}: both product checkout refs must be exactly dev`);
+    }
   }
   if (filePath.endsWith("/pr-gate.yml")) {
     if (!hasPullRequestTarget) errors.push(`${fileName}: expected pull_request_target trigger`);

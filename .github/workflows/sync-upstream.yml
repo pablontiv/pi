@@ -23,7 +23,7 @@ jobs:
       - name: Checkout fork product branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: local/tool-row-visibility
+          ref: dev
           fetch-depth: 0
           persist-credentials: false
 
@@ -61,7 +61,7 @@ jobs:
       - name: Checkout Pion product branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: local/tool-row-visibility
+          ref: dev
           fetch-depth: 0
           persist-credentials: false
 
@@ -80,5 +80,5 @@ jobs:
             echo "- Pion-only commits: ${ahead}"
           } >> "${GITHUB_STEP_SUMMARY}"
           if (( behind > 0 )); then
-            echo "::warning::local/tool-row-visibility is ${behind} commit(s) behind upstream; rebase and validate per ADR 0004."
+            echo "::warning::dev is ${behind} commit(s) behind upstream; rebase and validate."
           fi
