@@ -77,7 +77,7 @@ import type {
 	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
-import type { Settings } from "../settings-manager.ts";
+import type { Settings, SettingsScope } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -100,11 +100,25 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import type {
+	ExtensionSettingDefinition,
+	ExtensionSettingHandle,
+	RegisteredExtensionSetting,
+} from "./extension-settings.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
+export type {
+	ExtensionSettingChoice,
+	ExtensionSettingDefinition,
+	ExtensionSettingHandle,
+	RegisteredExtensionSetting,
+} from "./extension-settings.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
+
+/** Settings visible to extensions. Raw extension-owned values are accessed through typed handles. */
+export type ExtensionAPISettings = Omit<Settings, "extensionSettings">;
 
 // ============================================================================
 // UI Context
@@ -1623,8 +1637,13 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): () => void;
 
 	// =========================================================================
-	// Tool Registration
+	// Setting and Tool Registration
 	// =========================================================================
+
+	/** Register an extension-owned setting during extension initialization. */
+	registerSetting<TSchemaType extends TSchema>(
+		definition: ExtensionSettingDefinition<TSchemaType>,
+	): ExtensionSettingHandle<Static<TSchemaType>>;
 
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown, TState = any>(
@@ -1727,8 +1746,8 @@ export interface ExtensionAPI {
 	/** Get all configured tools with parameter schema, prompt guidelines, exposure, and source metadata. */
 	getAllTools(): ToolInfo[];
 
-	/** Get a copy of the effective settings (global and project settings merged, with overrides). */
-	getSettings(): Settings;
+	/** Get a copy of the effective settings, excluding raw extension-owned values. */
+	getSettings(): ExtensionAPISettings;
 
 	/**
 	 * Set the active tools by name. Unknown and `hidden` tools are ignored. Tools with `codemode` or
@@ -2109,6 +2128,9 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
+	getExtensionSetting: (extensionPath: string, key: string) => unknown;
+	setExtensionSetting: (extensionPath: string, key: string, value: unknown, scope: SettingsScope) => void;
+	onExtensionSettingChange: (extensionPath: string, key: string, listener: (value: unknown) => void) => () => void;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
 	/** Native pi-ai provider registrations queued during extension loading, processed when runner binds. */
@@ -2237,6 +2259,7 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	settings?: Map<string, RegisteredExtensionSetting>;
 }
 
 /** Result of loading extensions. */

@@ -111,6 +111,27 @@ describe("ExtensionRunner", () => {
 		getScopedModels: () => [],
 	};
 
+	describe("settings access", () => {
+		it("redacts extensionSettings without mutating the core snapshot", async () => {
+			let getSettings: (() => unknown) | undefined;
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					getSettings = () => pi.getSettings();
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const snapshot = { theme: "dark", extensionSettings: { "acme.mode": "compact" } };
+			runner.bindCore({ ...extensionActions, getSettings: () => snapshot }, extensionContextActions);
+
+			expect(getSettings?.()).toEqual({ theme: "dark" });
+			expect(snapshot).toEqual({ theme: "dark", extensionSettings: { "acme.mode": "compact" } });
+		});
+	});
+
 	describe("scopedModels", () => {
 		it("reflects the getScopedModels context action on ctx.scopedModels", async () => {
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
