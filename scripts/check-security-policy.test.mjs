@@ -115,6 +115,23 @@ test("upstream-only jobs require an explicit repository guard", () => {
   const source = readFileSync(`${ROOT}/.github/workflows/approve-contributor.yml`, "utf8");
   writeFileSync(path, source.replace("    if: ${{ github.repository == 'earendil-works/pi' }}\n", ""));
   assert.match(checkWorkflow(path).join("\n"), /must be guarded to earendil-works\/pi/u);
+
+  writeFileSync(
+    path,
+    source.replace(
+      "    if: ${{ github.repository == 'earendil-works/pi' }}",
+      "    if: ${{ github.repository == 'earendil-works/pi' || github.repository_owner != '' }}",
+    ),
+  );
+  assert.match(checkWorkflow(path).join("\n"), /must be guarded to earendil-works\/pi/u);
+});
+
+test("scheduled workflows require repository guards", () => {
+  const path = "/tmp/security-policy-scheduled.yml";
+  for (const trigger of ['on:\n  schedule:\n    - cron: "17 4 * * *"', "on: [push, schedule]"]) {
+    writeFileSync(path, workflow().replace("on: push", trigger));
+    assert.match(checkWorkflow(path).join("\n"), /scheduled job test must have a repository guard/u);
+  }
 });
 
 test("the upstream sync workflow can never push to upstream", () => {
@@ -125,6 +142,24 @@ test("the upstream sync workflow can never push to upstream", () => {
     source.replace(
       "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git",
       "https://x-access-token:${GH_TOKEN}@github.com/earendil-works/pi.git",
+    ),
+  );
+  assert.match(checkWorkflow(path).join("\n"), /must never push to upstream/u);
+
+  writeFileSync(
+    path,
+    source.replace(
+      'git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \\\n',
+      'git push \\\n            "https://x-access-token:${GH_TOKEN}@github.com/earendil-works/pi.git" \\\n',
+    ),
+  );
+  assert.match(checkWorkflow(path).join("\n"), /must never push to upstream/u);
+
+  writeFileSync(
+    path,
+    source.replace(
+      'git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \\\n',
+      "git push -f git@github.com:earendil-works/pi.git \\\n",
     ),
   );
   assert.match(checkWorkflow(path).join("\n"), /must never push to upstream/u);

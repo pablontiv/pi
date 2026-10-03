@@ -26,6 +26,8 @@ const ALLOWED_ENV_EXAMPLES = [".env.example", ".env.local.example"];
 const UPSTREAM_ONLY_JOBS = {
   "approve-contributor.yml": ["approve"],
   "build-binaries.yml": [
+    "build",
+    "smoke-test-binaries",
     "stage-github-release",
     "publish-npm",
     "announce-pi-dev-release",
@@ -35,14 +37,15 @@ const UPSTREAM_ONLY_JOBS = {
   "issue-analysis.yml": ["authorize", "analyze"],
   "issue-gate.yml": ["check-contributor"],
   "issue-triage-labels.yml": ["update-labels"],
-  "nix.yml": ["update-stable", "commit-pin"],
+  "nix.yml": ["pin", "build", "update-stable", "commit-pin"],
   "pr-gate.yml": ["check-contributor"],
-  "publish-model-catalog.yml": ["publish"],
+  "publish-model-catalog.yml": ["generate", "publish"],
   "remove-inprogress-on-close.yml": ["remove-label"],
 };
 const FORK_ONLY_JOBS = {
   "sync-upstream.yml": ["sync-main", "report-product-drift"],
 };
+const SCHEDULE_GUARD_EXEMPT_WORKFLOWS = new Set(["npm-audit.yml"]);
 const REQUIRED_CODEOWNERS = [
   "* @pablontiv",
   "/.github/** @pablontiv",
@@ -168,6 +171,19 @@ function jobBlocks(lines) {
   });
 }
 
+function hasRepositoryGuard(lines, job, repositories) {
+  return lines.slice(job.start + 1, job.end).some((line) => {
+    return repositories.some((repository) => {
+      const escapedRepository = repository.replace("/", "\\/");
+      const guard = new RegExp(
+        `^\\s{4}if:\\s*\\$\\{\\{\\s*github\\.repository\\s*==\\s*['"]${escapedRepository}['"]\\s*(?:&&|\\}\\})`,
+        "u",
+      );
+      return guard.test(line);
+    });
+  });
+}
+
 function checkRepositoryGuards(filePath, lines, jobs, errors) {
   const fileName = basename(filePath);
   for (const [repository, contracts] of [
@@ -180,9 +196,21 @@ function checkRepositoryGuards(filePath, lines, jobs, errors) {
         errors.push(`${fileName}: required guarded job ${jobName} is missing`);
         continue;
       }
-      const guard = new RegExp(`^\\s{4}if:\\s*.*github\\.repository\\s*==\\s*['"]${repository.replace("/", "\\/")}['"]`, "u");
-      if (!lines.slice(job.start + 1, job.end).some((line) => guard.test(line))) {
+      if (!hasRepositoryGuard(lines, job, [repository])) {
         errors.push(`${fileName}: job ${jobName} must be guarded to ${repository}`);
+      }
+    }
+  }
+
+  const jobsStart = lines.findIndex((line) => /^jobs:\s*$/u.test(line));
+  const workflowHeader = lines.slice(0, jobsStart < 0 ? lines.length : jobsStart);
+  const hasSchedule = workflowHeader.some((line) => {
+    return /^\s*schedule\s*:/u.test(line) || /^\s*on:\s*(?:\[[^\]]*\bschedule\b|\{[^}]*\bschedule\s*:)/u.test(line);
+  });
+  if (hasSchedule && !SCHEDULE_GUARD_EXEMPT_WORKFLOWS.has(fileName)) {
+    for (const job of jobs) {
+      if (!hasRepositoryGuard(lines, job, ["earendil-works/pi", "pablontiv/pi"])) {
+        errors.push(`${fileName}: scheduled job ${job.name} must have a repository guard`);
       }
     }
   }
@@ -258,7 +286,12 @@ export function checkWorkflow(filePath) {
     if (!/git merge-base --is-ancestor/u.test(text)) {
       errors.push(`${fileName}: must refuse non-fast-forward main updates`);
     }
-    if (/git push[^\n]*(?:upstream|earendil-works\/pi)/u.test(text)) {
+    const logicalShellText = text.replace(/\\\r?\n[ \t]*/gu, " ");
+    if (
+      /git push(?:\s+-{1,2}\S+)*\s+["']?(?:upstream\b|https:\/\/[^\s"']*github\.com\/earendil-works\/pi(?:\.git)?\b|git@github\.com:earendil-works\/pi(?:\.git)?\b)/u.test(
+        logicalShellText,
+      )
+    ) {
       errors.push(`${fileName}: must never push to upstream`);
     }
   }
