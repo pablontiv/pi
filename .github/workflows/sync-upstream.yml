@@ -150,6 +150,7 @@ jobs:
         if: ${{ steps.candidate.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
           ORIGINAL_DEV_SHA: ${{ steps.candidate.outputs.dev_sha }}
           SYNCED_MAIN_SHA: ${{ steps.candidate.outputs.main_sha }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -163,9 +164,16 @@ jobs:
           [[ "$(git rev-parse "${CANDIDATE_SHA}^2")" == "${SYNCED_MAIN_SHA}" ]]
           git merge-base --is-ancestor "${ORIGINAL_DEV_SHA}" "${CANDIDATE_SHA}"
           git merge-base --is-ancestor "${SYNCED_MAIN_SHA}" "${CANDIDATE_SHA}"
+          [[ -n "${PION_SYNC_DEPLOY_KEY}" ]]
 
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "${CANDIDATE_SHA}:refs/heads/dev"
+          key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
+          known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
+          trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
+          printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
+          chmod 0600 "${key_path}"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
+          GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
+            git push "git@github.com:${GITHUB_REPOSITORY}.git" "${CANDIDATE_SHA}:refs/heads/dev"
           {
             echo "## Pion updated from upstream"
             echo
