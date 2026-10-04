@@ -1,3 +1,4 @@
+import { readFileSync, rmSync } from "node:fs";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { SystemMessage, ToolResultMessage } from "@earendil-works/pi-ai/compat";
 import { type JsonRpcRequest, LATEST_PROTOCOL_VERSION } from "@earendil-works/pi-mcp";
@@ -254,11 +255,16 @@ describe("AgentSession MCP integration", () => {
 
 		const result = toolResult(harness, "codemode");
 		expect(result.isError).toBe(false);
-		// Output items keep the order the script produced them in, with each saved-image label before its image.
-		expect(result.content[1]).toEqual({
-			type: "text",
-			text: expect.stringMatching(/^\[Image saved to .+ \(image\/png, 70B\)\]$/),
-		});
+		// Output items keep the order the script produced them in; each image follows the path it was saved to.
+		const savedPath = /^\[Image saved to (\S+\.png) \(image\/png, \d+B\)\]$/.exec(
+			(result.content[1] as { text: string }).text,
+		)?.[1];
+		expect(savedPath).toBeDefined();
+		try {
+			expect(readFileSync(savedPath!).toString("base64")).toBe(TINY_PNG_BASE64);
+		} finally {
+			if (savedPath) rmSync(savedPath, { force: true });
+		}
 		expect(result.content[2]).toEqual({ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" });
 		expect(JSON.parse((result.content[3] as { text: string }).text)).toEqual({
 			hits: ["mcp guide", "mcp faq", "pi guide", "pi faq"],
