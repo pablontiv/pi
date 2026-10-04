@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OAuth credentials being invalidated when a request or model refresh was cancelled or superseded during a token refresh: a token refresh that has started now completes and persists the rotated refresh token
+
+## [1.0.2] - 2026-10-04
+
+### Added
+
+- Added per-thinking-level sampling parameter overrides (`samplingParamsByThinkingLevel`) for `openai-completions`, `openai-responses`, and `azure-openai-responses` requests ([#9776](https://github.com/earendil-works/pi/pull/9776) by [@mrexodia](https://github.com/mrexodia))
+
 ## [1.0.1] - 2026-10-03
 
 ### Added
