@@ -198,6 +198,57 @@ test("the upstream sync workflow rejects unnamed and extra action steps", () => 
   assert.match(errors, /security-reviewed order/u);
 });
 
+test("critical sync steps reject unexpected control attributes and execution combinations", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const mutations = [
+    source.replace("      - name: Classify merge candidate\n", "      - name: Classify merge candidate\n        if: ${{ false }}\n"),
+    source.replace("      - name: Classify merge candidate\n", "      - name: Classify merge candidate\n        continue-on-error: true\n"),
+    source.replace("        id: candidate\n", "        id: candidate\n        with:\n          unsafe: true\n"),
+    source.replace(
+      "          SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}\n",
+      "          SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}\n          UNEXPECTED_ENV: true\n",
+    ),
+  ];
+  for (const mutated of mutations) {
+    writeFileSync(path, mutated);
+    assert.match(checkWorkflow(path).join("\n"), /Classify merge candidate must exactly match/u);
+  }
+});
+
+test("critical sync steps reject extra active commands and persisted runner state", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const mutations = [
+    {
+      replacement: '          [[ -s "${known_hosts}" ]]\n          echo unexpected',
+      expected: /Prepare trusted tag publication state must exactly match/u,
+    },
+    {
+      replacement: '          [[ -s "${known_hosts}" ]]\n          echo "PATH=/tmp/unsafe:${PATH}" >> "${GITHUB_ENV}"',
+      expected: /must not persist environment or state/u,
+    },
+  ];
+  for (const mutation of mutations) {
+    writeFileSync(path, source.replace('          [[ -s "${known_hosts}" ]]', mutation.replacement));
+    assert.match(checkWorkflow(path).join("\n"), mutation.expected);
+  }
+});
+
+test("critical sync steps reject altered exact active command bodies", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const mutations = [
+    source.replace("node scripts/classify-upstream-merge.mjs", "node scripts/alternate-classifier.mjs"),
+    source.replace("gh api repos/earendil-works/pi/releases/latest", "gh api repos/pablontiv/pi/releases/latest"),
+    source.replace("https://api.github.com/meta", "https://github.com/meta"),
+  ];
+  for (const mutated of mutations) {
+    writeFileSync(path, mutated);
+    assert.match(checkWorkflow(path).join("\n"), /must exactly match its security-reviewed structure and active command body/u);
+  }
+});
+
 test("the upstream sync workflow rejects commented or dead-code release validation", () => {
   const path = "/tmp/sync-upstream.yml";
   const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");

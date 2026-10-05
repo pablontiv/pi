@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -251,6 +252,27 @@ function activeRunLines(step) {
     .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
 }
 
+function stepHeaders(step) {
+  return step.lines
+    .filter((line, index) => index === 0 || /^        [A-Za-z0-9_-]+:/u.test(line))
+    .map((line) => line.trim());
+}
+
+function stepMapping(step, key) {
+  const start = step.lines.findIndex((line) => line === `        ${key}:`);
+  if (start < 0) return [];
+  const result = [];
+  for (let index = start + 1; index < step.lines.length; index += 1) {
+    if (/^        [A-Za-z0-9_-]+:/u.test(step.lines[index])) break;
+    if (step.lines[index].trim() && !step.lines[index].trimStart().startsWith("#")) result.push(step.lines[index].trim());
+  }
+  return result;
+}
+
+function activeBodyDigest(step) {
+  return createHash("sha256").update(activeRunLines(step).join("\n")).digest("hex");
+}
+
 function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
   const expectedJobNames = ["sync-main", "sync-dev", "prepare-pion-tag", "publish-pion-tag"];
   if (jobs.map((job) => job.name).join("\n") !== expectedJobNames.join("\n")) {
@@ -292,6 +314,65 @@ function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
   }
 
   const allSteps = [...stepsByJob.entries()].flatMap(([jobName, steps]) => steps.map((step) => ({ jobName, ...step })));
+  const criticalStepContracts = [
+    {
+      jobName: "sync-dev",
+      name: "Classify merge candidate",
+      headers: ["- name: Classify merge candidate", "id: candidate", "env:", "run: |"],
+      env: ["SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}"],
+      bodyDigest: "9f950a78888f3df66873c947235dd0227e8b03aab99a2f78b0ca9fae8f709b96",
+    },
+    {
+      jobName: "prepare-pion-tag",
+      name: "Prepare Pion tag publication",
+      headers: ["- name: Prepare Pion tag publication", "id: prepare", "env:", "run: |"],
+      env: ["GH_TOKEN: ${{ github.token }}"],
+      bodyDigest: "b5775348f4f9be20057244461032553e5a010715b56e36306c52f6707b2cbd1c",
+    },
+    {
+      jobName: "publish-pion-tag",
+      name: "Prepare trusted tag publication state",
+      headers: ["- name: Prepare trusted tag publication state", "env:", "run: |"],
+      env: [
+        "DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}",
+        "UPSTREAM_SHA: ${{ needs.prepare-pion-tag.outputs.upstream_sha }}",
+        "UPSTREAM_TAG: ${{ needs.prepare-pion-tag.outputs.upstream_tag }}",
+        "VERSION: ${{ needs.prepare-pion-tag.outputs.version }}",
+        "PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}",
+        "SOURCE_VALIDATED: ${{ needs.prepare-pion-tag.outputs.source_validated }}",
+        "RELEASE_ELIGIBLE: ${{ needs.prepare-pion-tag.outputs.release_eligible }}",
+        "PUBLISH_REQUIRED: ${{ needs.prepare-pion-tag.outputs.publish_required }}",
+      ],
+      bodyDigest: "0295ad4dae23eb65c43d36deef83f81ec9d2213eb2f209726947b4728646f730",
+    },
+    {
+      jobName: "publish-pion-tag",
+      name: "Publish exact Pion tag",
+      headers: ["- name: Publish exact Pion tag", "env:", "run: |"],
+      env: [
+        "DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}",
+        "PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}",
+        "PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}",
+      ],
+      bodyDigest: "e536ce601a692897e26ea03a301d359deab2bdb2c88be3c48ccfb8951cff1473",
+    },
+  ];
+  for (const contract of criticalStepContracts) {
+    const matches = allSteps.filter((step) => step.jobName === contract.jobName && step.name === contract.name);
+    const step = matches[0];
+    if (
+      matches.length !== 1 ||
+      stepHeaders(step).join("\n") !== contract.headers.join("\n") ||
+      stepMapping(step, "env").join("\n") !== contract.env.join("\n") ||
+      activeBodyDigest(step) !== contract.bodyDigest
+    ) {
+      errors.push(`${fileName}: ${contract.name} must exactly match its security-reviewed structure and active command body`);
+    }
+  }
+  if (allSteps.some((step) => activeRunLines(step).some((line) => /\bGITHUB_(?:ENV|STATE)\b/u.test(line)))) {
+    errors.push(`${fileName}: sync steps must not persist environment or state for later credential-bearing steps`);
+  }
+
   const deployKeyConsumers = allSteps.filter((step) => step.lines.some((line) => /secrets\.PION_SYNC_DEPLOY_KEY/u.test(line)));
   if (
     deployKeyConsumers.length !== 1 ||
