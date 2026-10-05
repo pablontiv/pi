@@ -103,15 +103,43 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --detach "${dev_sha}"
-          if git merge --no-ff --no-edit "${main_sha}"; then
-            echo "Upstream merged without conflicts."
-          else
-            node scripts/reconcile-upstream-workflow-conflicts.mjs --main "${main_sha}"
-            git diff --check --cached
-            git commit --no-edit
+          if ! git merge --no-ff --no-edit "${main_sha}"; then
+            {
+              echo "## Upstream synchronization blocked"
+              echo
+              echo "The automatic merge has conflicts in:"
+              while IFS= read -r -d '' path; do
+                printf -- '%s\n' "- \`${path//\`/\\\`}\`"
+              done < <(git diff --name-only -z --diff-filter=U)
+              echo
+              echo "A separately reviewed manual PR is required. Synchronization and release were not promoted."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error::Upstream merge has conflicts; a separately reviewed manual PR is required."
+            exit 1
           fi
 
           candidate_sha="$(git rev-parse HEAD)"
+          if [[ "${candidate_sha}" == "${dev_sha}" ]]; then
+            echo "Merge produced no new candidate; release eligibility will be evaluated on current dev."
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! git diff --quiet "${dev_sha}" "${candidate_sha}" -- .github/workflows; then
+            {
+              echo "## Upstream synchronization blocked"
+              echo
+              echo "The clean merge candidate changes workflow paths:"
+              echo '```text'
+              git diff --name-status --no-renames "${dev_sha}" "${candidate_sha}" -- .github/workflows
+              echo '```'
+              echo
+              echo "A separately reviewed manual PR is required. Synchronization and release were not promoted."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error::Merge candidate changes .github/workflows; a separately reviewed manual PR is required."
+            exit 1
+          fi
+
           candidate_branch="local/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "${candidate_sha}:refs/heads/${candidate_branch}"
