@@ -33,7 +33,6 @@ jobs:
         id: sync
         env:
           GH_TOKEN: ${{ github.token }}
-          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -46,15 +45,8 @@ jobs:
           if [[ "${fork_main}" == "${upstream_main}" ]]; then
             echo "Fork main is already current at ${fork_main}."
           elif git merge-base --is-ancestor "${fork_main}" "${upstream_main}"; then
-            [[ -n "${PION_SYNC_DEPLOY_KEY}" ]]
-            key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
-            known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
-            trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
-            printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
-            chmod 0600 "${key_path}"
-            gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
-            GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
-              git push "git@github.com:${GITHUB_REPOSITORY}.git" "${upstream_main}:refs/heads/main"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "${upstream_main}:refs/heads/main"
           else
             echo "::error::Fork main diverged from upstream; refusing a non-fast-forward update."
             exit 1
@@ -77,10 +69,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Create merge candidate
+      - name: Classify merge candidate
         id: candidate
         env:
-          GH_TOKEN: ${{ github.token }}
           SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}
         run: |
           set -euo pipefail
@@ -94,69 +85,26 @@ jobs:
             echo "::error::main changed after upstream sync; retry on the next run."
             exit 1
           fi
-          if git merge-base --is-ancestor "${main_sha}" "${dev_sha}"; then
-            echo "dev already contains main at ${main_sha}."
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
+          node scripts/classify-upstream-merge.mjs "${dev_sha}" "${main_sha}"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --detach "${dev_sha}"
-          if ! git merge --no-ff --no-edit "${main_sha}"; then
-            {
-              echo "## Upstream synchronization blocked"
-              echo
-              echo "The automatic merge has conflicts in:"
-              while IFS= read -r -d '' path; do
-                printf -- '%s\n' "- \`${path//\`/\\\`}\`"
-              done < <(git diff --name-only -z --diff-filter=U)
-              echo
-              echo "A separately reviewed manual PR is required. Synchronization and release were not promoted."
-            } >> "${GITHUB_STEP_SUMMARY}"
-            echo "::error::Upstream merge has conflicts; a separately reviewed manual PR is required."
-            exit 1
-          fi
-
-          candidate_sha="$(git rev-parse HEAD)"
-          if [[ "${candidate_sha}" == "${dev_sha}" ]]; then
-            echo "Merge produced no new candidate; release eligibility will be evaluated on current dev."
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          if ! git diff --quiet "${dev_sha}" "${candidate_sha}" -- .github/workflows; then
-            {
-              echo "## Upstream synchronization blocked"
-              echo
-              echo "The clean merge candidate changes workflow paths:"
-              echo '```text'
-              git diff --name-status --no-renames "${dev_sha}" "${candidate_sha}" -- .github/workflows
-              echo '```'
-              echo
-              echo "A separately reviewed manual PR is required. Synchronization and release were not promoted."
-            } >> "${GITHUB_STEP_SUMMARY}"
-            echo "::error::Merge candidate changes .github/workflows; a separately reviewed manual PR is required."
-            exit 1
-          fi
-
-          candidate_branch="local/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "${candidate_sha}:refs/heads/${candidate_branch}"
-
-          {
-            echo "changed=true"
-            echo "dev_sha=${dev_sha}"
-            echo "main_sha=${main_sha}"
-            echo "candidate_sha=${candidate_sha}"
-            echo "candidate_branch=${candidate_branch}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Run CI on merge candidate
-        if: ${{ steps.candidate.outputs.changed == 'true' }}
+      - name: Publish merge candidate
+        id: publish-candidate
+        if: ${{ steps.candidate.outputs.candidate == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.candidate_branch }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          candidate_branch="local/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${CANDIDATE_SHA}:refs/heads/${candidate_branch}"
+          echo "candidate_branch=${candidate_branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run CI on merge candidate
+        if: ${{ steps.candidate.outputs.candidate == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BRANCH: ${{ steps.publish-candidate.outputs.candidate_branch }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         run: |
           set -euo pipefail
@@ -189,10 +137,9 @@ jobs:
           done
 
       - name: Promote tested candidate to dev
-        if: ${{ steps.candidate.outputs.changed == 'true' }}
+        if: ${{ steps.candidate.outputs.candidate == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
           ORIGINAL_DEV_SHA: ${{ steps.candidate.outputs.dev_sha }}
           SYNCED_MAIN_SHA: ${{ steps.candidate.outputs.main_sha }}
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -206,16 +153,8 @@ jobs:
           [[ "$(git rev-parse "${CANDIDATE_SHA}^2")" == "${SYNCED_MAIN_SHA}" ]]
           git merge-base --is-ancestor "${ORIGINAL_DEV_SHA}" "${CANDIDATE_SHA}"
           git merge-base --is-ancestor "${SYNCED_MAIN_SHA}" "${CANDIDATE_SHA}"
-          [[ -n "${PION_SYNC_DEPLOY_KEY}" ]]
-
-          key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
-          known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
-          trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
-          printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
-          chmod 0600 "${key_path}"
-          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
-          GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
-            git push "git@github.com:${GITHUB_REPOSITORY}.git" "${CANDIDATE_SHA}:refs/heads/dev"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${CANDIDATE_SHA}:refs/heads/dev"
           {
             echo "## Pion updated from upstream"
             echo
@@ -225,21 +164,30 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Remove merge candidate branch
-        if: ${{ always() && steps.candidate.outputs.changed == 'true' }}
+        if: ${{ always() && steps.candidate.outputs.candidate == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.candidate_branch }}
+          CANDIDATE_BRANCH: ${{ steps.publish-candidate.outputs.candidate_branch }}
         run: |
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             --delete "refs/heads/${CANDIDATE_BRANCH}"
 
-  tag-pion-release:
+  prepare-pion-tag:
     if: ${{ github.repository == 'pablontiv/pi' }}
     needs: sync-dev
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
+    outputs:
+      dev_sha: ${{ steps.prepare.outputs.dev_sha }}
+      upstream_sha: ${{ steps.prepare.outputs.upstream_sha }}
+      upstream_tag: ${{ steps.prepare.outputs.upstream_tag }}
+      version: ${{ steps.prepare.outputs.version }}
+      pion_tag: ${{ steps.prepare.outputs.pion_tag }}
+      source_validated: ${{ steps.prepare.outputs.source_validated }}
+      release_eligible: ${{ steps.prepare.outputs.release_eligible }}
+      publish_required: ${{ steps.prepare.outputs.publish_required }}
     steps:
       - name: Checkout current Pion dev source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -253,10 +201,10 @@ jobs:
         with:
           node-version: "22.19.0"
 
-      - name: Validate latest upstream release and tag dev
+      - name: Prepare Pion tag publication
+        id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
-          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           release="$(gh api repos/earendil-works/pi/releases/latest)"
@@ -291,30 +239,89 @@ jobs:
           fi
           node scripts/create-pion-release.mjs --validate-source --version "${version}"
 
+          publish_required=true
           if git ls-remote --exit-code --refs origin "refs/tags/${pion_tag}" >/dev/null 2>&1; then
             git fetch --no-tags origin "+refs/tags/${pion_tag}:refs/pion-existing-release"
             existing_commit="$(git rev-list -n 1 refs/pion-existing-release)"
             git merge-base --is-ancestor "${upstream_commit}" "${existing_commit}"
             git merge-base --is-ancestor "${existing_commit}" "${dev_commit}"
+            publish_required=false
             echo "Existing ${pion_tag} is a valid recoverable release tag."
-            exit 0
           fi
 
-          git fetch --no-tags origin +refs/heads/dev:refs/remotes/origin/dev
-          test "$(git rev-parse refs/remotes/origin/dev)" = "${dev_commit}"
-          test -n "${PION_SYNC_DEPLOY_KEY}"
+          {
+            echo "dev_sha=${dev_commit}"
+            echo "upstream_sha=${upstream_commit}"
+            echo "upstream_tag=${upstream_tag}"
+            echo "version=${version}"
+            echo "pion_tag=${pion_tag}"
+            echo "source_validated=true"
+            echo "release_eligible=true"
+            echo "publish_required=${publish_required}"
+          } >> "${GITHUB_OUTPUT}"
+
+  publish-pion-tag:
+    if: ${{ github.repository == 'pablontiv/pi' && needs.prepare-pion-tag.outputs.publish_required == 'true' }}
+    needs: prepare-pion-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Prepare trusted tag publication state
+        env:
+          DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}
+          UPSTREAM_SHA: ${{ needs.prepare-pion-tag.outputs.upstream_sha }}
+          UPSTREAM_TAG: ${{ needs.prepare-pion-tag.outputs.upstream_tag }}
+          VERSION: ${{ needs.prepare-pion-tag.outputs.version }}
+          PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}
+          SOURCE_VALIDATED: ${{ needs.prepare-pion-tag.outputs.source_validated }}
+          RELEASE_ELIGIBLE: ${{ needs.prepare-pion-tag.outputs.release_eligible }}
+          PUBLISH_REQUIRED: ${{ needs.prepare-pion-tag.outputs.publish_required }}
+        run: |
+          set -euo pipefail
+          [[ "${DEV_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${UPSTREAM_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${UPSTREAM_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${VERSION}" == "${UPSTREAM_TAG#v}" ]]
+          [[ "${PION_TAG}" == "pion-${UPSTREAM_TAG}" ]]
+          [[ "${SOURCE_VALIDATED}" == "true" ]]
+          [[ "${RELEASE_ELIGIBLE}" == "true" ]]
+          [[ "${PUBLISH_REQUIRED}" == "true" ]]
+
+          publish_root="${RUNNER_TEMP}/pion-tag-publish"
+          known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
+          rm -rf "${publish_root}"
+          git init --quiet "${publish_root}"
+          git -C "${publish_root}" remote add origin https://github.com/pablontiv/pi.git
+          git -C "${publish_root}" fetch --no-tags origin +refs/heads/dev:refs/remotes/origin/dev
+          [[ "$(git -C "${publish_root}" rev-parse refs/remotes/origin/dev)" == "${DEV_SHA}" ]]
+          git -C "${publish_root}" fetch --no-tags https://github.com/earendil-works/pi.git \
+            "+refs/tags/${UPSTREAM_TAG}:refs/pion-upstream-release"
+          [[ "$(git -C "${publish_root}" rev-list -n 1 refs/pion-upstream-release)" == "${UPSTREAM_SHA}" ]]
+          git -C "${publish_root}" merge-base --is-ancestor "${UPSTREAM_SHA}" "${DEV_SHA}"
+          set +e
+          git -C "${publish_root}" ls-remote --exit-code --refs origin "refs/tags/${PION_TAG}" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          [[ "${tag_status}" == "2" ]]
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 https://api.github.com/meta \
+            | jq -er '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
+          [[ -s "${known_hosts}" ]]
+
+      - name: Publish exact Pion tag
+        env:
+          DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}
+          PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}
+          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
           key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
           known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
-          trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
+          trap 'rm -f "${key_path}"' EXIT
+          test -n "${PION_SYNC_DEPLOY_KEY}"
           printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
           chmod 0600 "${key_path}"
-          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
-          git tag "${pion_tag}" "${dev_commit}"
-          if GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
-            git push "git@github.com:${GITHUB_REPOSITORY}.git" "refs/tags/${pion_tag}:refs/tags/${pion_tag}"; then
-            echo "Created ${pion_tag} at ${dev_commit}."
-          else
-            git fetch --no-tags origin "+refs/tags/${pion_tag}:refs/pion-concurrent-release"
-            test "$(git rev-list -n 1 refs/pion-concurrent-release)" = "${dev_commit}"
-            echo "Concurrent run created the same ${pion_tag} target."
-          fi
+          GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
+            git -c core.hooksPath=/dev/null -C "${RUNNER_TEMP}/pion-tag-publish" push "git@github.com:pablontiv/pi.git" \
+              "${DEV_SHA}:refs/tags/${PION_TAG}"

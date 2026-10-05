@@ -77,7 +77,7 @@ test("accepts only canonical versions and matching canonical upstream tags", () 
 
 test("validates the complete lockstep public workspace and package-lock set", () => withFixture((root) => {
 	const result = validateReleaseSnapshot(root, VERSION);
-	assert.equal(result.packages.length, 12);
+	assert.equal(result.packages.length, 13);
 	assert.equal(result.releaseDate, DATE);
 	replace(root, "packages/ai/package.json", VERSION, "1.2.2");
 	assert.throws(() => validateReleaseSnapshot(root, VERSION), /package\.json has version 1\.2\.2/u);
@@ -102,6 +102,10 @@ test("rejects wrong package names and path substitutions", () => {
 	withFixture((root) => {
 		replace(root, "packages/ai/package.json", "@earendil-works/pi-ai", "@earendil-works/pi-substitute");
 		assert.throws(() => validateReleaseSnapshot(root, VERSION), /packages\/ai has name .* expected @earendil-works\/pi-ai/u);
+	});
+	withFixture((root) => {
+		replace(root, "packages/env/package.json", "@earendil-works/pi-env", "@earendil-works/pi-substitute");
+		assert.throws(() => validateReleaseSnapshot(root, VERSION), /packages\/env has name .* expected @earendil-works\/pi-env/u);
 	});
 	withFixture((root) => {
 		rmSync(join(root, "packages/agent"), { recursive: true });

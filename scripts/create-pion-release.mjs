@@ -19,6 +19,7 @@ export const EXPECTED_PUBLIC_PACKAGES = Object.freeze({
 	"packages/codemode": "@earendil-works/pi-codemode",
 	"packages/coding-agent": "@earendil-works/pi-coding-agent",
 	"packages/durable": "@earendil-works/pi-durable",
+	"packages/env": "@earendil-works/pi-env",
 	"packages/mcp": "@earendil-works/pi-mcp",
 	"packages/protocol": "@earendil-works/pi-protocol",
 	"packages/server": "@earendil-works/pi-server",

@@ -183,6 +183,62 @@ test("the upstream sync workflow rejects a fourth inline checkout", () => {
   assert.match(checkWorkflow(path).join("\n"), /all three product checkout refs must be exactly dev/u);
 });
 
+test("the upstream sync workflow rejects unnamed and extra action steps", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  writeFileSync(
+    path,
+    source.replace(
+      "      - name: Prepare trusted tag publication state\n",
+      `      - uses: actions/cache@${ACTION_SHA}\n      - name: Prepare trusted tag publication state\n`,
+    ),
+  );
+  const errors = checkWorkflow(path).join("\n");
+  assert.match(errors, /unnamed step/u);
+  assert.match(errors, /security-reviewed order/u);
+});
+
+test("the upstream sync workflow rejects commented or dead-code release validation", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  for (const replacement of [
+    '          # node scripts/create-pion-release.mjs --validate-source --version "${version}"',
+    '          false && node scripts/create-pion-release.mjs --validate-source --version "${version}"',
+  ]) {
+    writeFileSync(
+      path,
+      source.replace(
+        '          node scripts/create-pion-release.mjs --validate-source --version "${version}"',
+        replacement,
+      ),
+    );
+    assert.match(checkWorkflow(path).join("\n"), /release source validation must run exactly once/u);
+  }
+});
+
+test("the upstream sync workflow rejects altered trusted comparisons", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  writeFileSync(
+    path,
+    source.replace('          [[ "${VERSION}" == "${UPSTREAM_TAG#v}" ]]', '          [[ "${VERSION}" != "${UPSTREAM_TAG#v}" ]]'),
+  );
+  assert.match(checkWorkflow(path).join("\n"), /independently and exactly revalidate publication state/u);
+});
+
+test("the secret-bearing tag step rejects alternate transports and repository code", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  for (const mutated of [
+    source.replace('git -c core.hooksPath=/dev/null -C "${RUNNER_TEMP}/pion-tag-publish" push', 'git -c core.hooksPath=/dev/null -C "${RUNNER_TEMP}/pion-tag-publish" send-pack'),
+    source.replace('          chmod 0600 "${key_path}"', '          chmod 0600 "${key_path}"\n          node scripts/create-pion-release.mjs --validate-source --version 1.0.4'),
+    source.replace('"git@github.com:pablontiv/pi.git"', '"https://github.com/pablontiv/pi.git"'),
+  ]) {
+    writeFileSync(path, mutated);
+    assert.match(checkWorkflow(path).join("\n"), /secret-bearing tag step must contain only the exact SSH tag push contract/u);
+  }
+});
+
 test("the upstream sync workflow can never push to upstream", () => {
   const path = "/tmp/sync-upstream.yml";
   const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");

@@ -45,7 +45,7 @@ const UPSTREAM_ONLY_JOBS = {
 };
 const FORK_ONLY_JOBS = {
   "release-pion.yml": ["build", "stage-github-release", "publish-github-release", "cleanup-draft-github-release"],
-  "sync-upstream.yml": ["sync-main", "sync-dev", "tag-pion-release"],
+  "sync-upstream.yml": ["sync-main", "sync-dev", "prepare-pion-tag", "publish-pion-tag"],
 };
 const SCHEDULE_GUARD_EXEMPT_WORKFLOWS = new Set(["npm-audit.yml"]);
 const REQUIRED_CODEOWNERS = [
@@ -227,6 +227,150 @@ function checkoutBlock(lines, index) {
   return block;
 }
 
+function jobSteps(lines, job) {
+  const starts = [];
+  for (let index = job.start + 1; index < job.end; index += 1) {
+    if (/^      -\s+/u.test(lines[index])) starts.push(index);
+  }
+  return starts.map((start, position) => {
+    const end = starts[position + 1] ?? job.end;
+    const first = lines[start];
+    const inlineName = first.match(/^      - name:\s*(.+?)\s*$/u)?.[1];
+    const followingName = lines.slice(start + 1, end).find((line) => /^        name:\s*/u.test(line));
+    const name = inlineName ?? followingName?.replace(/^        name:\s*/u, "").trim();
+    return { start, end, name: name ? unquote(name) : undefined, lines: lines.slice(start, end) };
+  });
+}
+
+function activeRunLines(step) {
+  const runIndex = step.lines.findIndex((line) => /^        run:\s*\|\s*$/u.test(line));
+  if (runIndex < 0) return [];
+  return step.lines
+    .slice(runIndex + 1)
+    .map((line) => line.replace(/^          /u, ""))
+    .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
+}
+
+function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
+  const expectedJobNames = ["sync-main", "sync-dev", "prepare-pion-tag", "publish-pion-tag"];
+  if (jobs.map((job) => job.name).join("\n") !== expectedJobNames.join("\n")) {
+    errors.push(`${fileName}: jobs must exactly match the security-reviewed order`);
+  }
+  const secretReferenceLines = lines.filter((line) => /\bsecrets(?:\.|\[)/u.test(line));
+  if (
+    secretReferenceLines.length !== 1 ||
+    secretReferenceLines[0].trim() !== "PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}"
+  ) {
+    errors.push(`${fileName}: workflow secret references must be limited to the exact deploy-key injection`);
+  }
+
+  const expectedSteps = {
+    "sync-main": ["Checkout fork product branch", "Fast-forward fork main from upstream"],
+    "sync-dev": [
+      "Checkout Pion product branch",
+      "Classify merge candidate",
+      "Publish merge candidate",
+      "Run CI on merge candidate",
+      "Promote tested candidate to dev",
+      "Remove merge candidate branch",
+    ],
+    "prepare-pion-tag": ["Checkout current Pion dev source", "Setup Node.js", "Prepare Pion tag publication"],
+    "publish-pion-tag": ["Prepare trusted tag publication state", "Publish exact Pion tag"],
+  };
+  const stepsByJob = new Map();
+  for (const [jobName, expected] of Object.entries(expectedSteps)) {
+    const job = jobs.find((candidate) => candidate.name === jobName);
+    if (!job) continue;
+    const steps = jobSteps(lines, job);
+    stepsByJob.set(jobName, steps);
+    if (steps.some((step) => !step.name)) {
+      errors.push(`${fileName}: job ${jobName} contains an unnamed step`);
+    }
+    if (steps.map((step) => step.name ?? "<unnamed>").join("\n") !== expected.join("\n")) {
+      errors.push(`${fileName}: job ${jobName} steps must exactly match the security-reviewed order`);
+    }
+  }
+
+  const allSteps = [...stepsByJob.entries()].flatMap(([jobName, steps]) => steps.map((step) => ({ jobName, ...step })));
+  const deployKeyConsumers = allSteps.filter((step) => step.lines.some((line) => /secrets\.PION_SYNC_DEPLOY_KEY/u.test(line)));
+  if (
+    deployKeyConsumers.length !== 1 ||
+    deployKeyConsumers[0].jobName !== "publish-pion-tag" ||
+    deployKeyConsumers[0].name !== "Publish exact Pion tag"
+  ) {
+    errors.push(`${fileName}: PION_SYNC_DEPLOY_KEY must have exactly one approved consumer`);
+  }
+
+  const sourceValidationSteps = allSteps.filter((step) => step.lines.some((line) => /create-pion-release\.mjs/u.test(line)));
+  if (
+    sourceValidationSteps.length !== 1 ||
+    sourceValidationSteps[0].jobName !== "prepare-pion-tag" ||
+    sourceValidationSteps[0].name !== "Prepare Pion tag publication" ||
+    !activeRunLines(sourceValidationSteps[0]).includes('node scripts/create-pion-release.mjs --validate-source --version "${version}"') ||
+    sourceValidationSteps[0].lines.some((line) => /\bsecrets\./u.test(line))
+  ) {
+    errors.push(`${fileName}: release source validation must run exactly once in the secretless preparation job`);
+  }
+
+  const classifier = stepsByJob.get("sync-dev")?.find((step) => step.name === "Classify merge candidate");
+  if (
+    !classifier ||
+    !activeRunLines(classifier).includes('node scripts/classify-upstream-merge.mjs "${dev_sha}" "${main_sha}"') ||
+    classifier.lines.some((line) => /\b(?:GH_TOKEN|PION_SYNC_DEPLOY_KEY|secrets\.)/u.test(line))
+  ) {
+    errors.push(`${fileName}: merge classification must use the production policy script without credentials`);
+  }
+
+  const trusted = stepsByJob.get("publish-pion-tag")?.find((step) => step.name === "Prepare trusted tag publication state");
+  const trustedLines = trusted ? activeRunLines(trusted) : [];
+  const requiredTrustedLines = [
+    '[[ "${DEV_SHA}" =~ ^[0-9a-f]{40}$ ]]',
+    '[[ "${UPSTREAM_SHA}" =~ ^[0-9a-f]{40}$ ]]',
+    '[[ "${UPSTREAM_TAG}" =~ ^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]',
+    '[[ "${VERSION}" == "${UPSTREAM_TAG#v}" ]]',
+    '[[ "${PION_TAG}" == "pion-${UPSTREAM_TAG}" ]]',
+    '[[ "${SOURCE_VALIDATED}" == "true" ]]',
+    '[[ "${RELEASE_ELIGIBLE}" == "true" ]]',
+    '[[ "${PUBLISH_REQUIRED}" == "true" ]]',
+    '[[ "$(git -C "${publish_root}" rev-parse refs/remotes/origin/dev)" == "${DEV_SHA}" ]]',
+    '[[ "$(git -C "${publish_root}" rev-list -n 1 refs/pion-upstream-release)" == "${UPSTREAM_SHA}" ]]',
+    'git -C "${publish_root}" merge-base --is-ancestor "${UPSTREAM_SHA}" "${DEV_SHA}"',
+    '[[ "${tag_status}" == "2" ]]',
+    '[[ -s "${known_hosts}" ]]',
+  ];
+  if (
+    !trusted ||
+    requiredTrustedLines.some((line) => !trustedLines.includes(line)) ||
+    !trustedLines.some((line) => line.includes('ls-remote --exit-code --refs origin "refs/tags/${PION_TAG}"')) ||
+    !trustedLines.some((line) => line.includes("https://api.github.com/meta")) ||
+    trusted.lines.some((line) => /\b(?:GH_TOKEN|PION_SYNC_DEPLOY_KEY|secrets\.)/u.test(line))
+  ) {
+    errors.push(`${fileName}: trusted tag preparation must independently and exactly revalidate publication state`);
+  }
+
+  const publisher = stepsByJob.get("publish-pion-tag")?.find((step) => step.name === "Publish exact Pion tag");
+  const expectedPublisherLines = [
+    "set -euo pipefail",
+    'key_path="${RUNNER_TEMP}/pion-sync-deploy-key"',
+    'known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"',
+    "trap 'rm -f \"${key_path}\"' EXIT",
+    'test -n "${PION_SYNC_DEPLOY_KEY}"',
+    "printf '%s\\n' \"${PION_SYNC_DEPLOY_KEY}\" > \"${key_path}\"",
+    'chmod 0600 "${key_path}"',
+    'GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \\',
+    '  git -c core.hooksPath=/dev/null -C "${RUNNER_TEMP}/pion-tag-publish" push "git@github.com:pablontiv/pi.git" \\',
+    '    "${DEV_SHA}:refs/tags/${PION_TAG}"',
+  ];
+  if (
+    !publisher ||
+    activeRunLines(publisher).join("\n") !== expectedPublisherLines.join("\n") ||
+    publisher.lines.some((line) => /\bGH_TOKEN\b|\buses:|git\s+send-pack|https?:\/\//u.test(line)) ||
+    publisher.lines.filter((line) => /secrets\.PION_SYNC_DEPLOY_KEY/u.test(line)).length !== 1
+  ) {
+    errors.push(`${fileName}: secret-bearing tag step must contain only the exact SSH tag push contract`);
+  }
+}
+
 export function checkWorkflow(filePath) {
   const fileName = relative(dirname(dirname(filePath)), filePath);
   const text = readFileSync(filePath, "utf8");
@@ -282,6 +426,7 @@ export function checkWorkflow(filePath) {
     errors.push(`${fileName}: pull_request_target is only allowed in pr-gate.yml`);
   }
   if (filePath.endsWith("/sync-upstream.yml")) {
+    checkSyncUpstreamContract(lines, jobs, fileName, errors);
     if (!/git fetch --no-tags https:\/\/github\.com\/earendil-works\/pi\.git/u.test(text)) {
       errors.push(`${fileName}: must fetch upstream over the public read-only URL`);
     }
