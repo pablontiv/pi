@@ -134,33 +134,34 @@ test("scheduled workflows require repository guards", () => {
   }
 });
 
-test("the upstream sync workflow requires both product checkouts to use dev", () => {
+test("the upstream sync workflow requires all three product checkouts to use dev", () => {
   const path = "/tmp/sync-upstream.yml";
   const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  assert.doesNotMatch(checkWorkflow(`${ROOT}/.github/workflows/sync-upstream.yml`).join("\n"), /product checkout refs/u);
   let replacements = 0;
-  for (const driftedCheckout of [0, 1]) {
+  for (const driftedCheckout of [0, 1, 2]) {
     replacements = 0;
     const drifted = source.replace(/^          ref: dev$/gmu, () => {
       const replacement = replacements === driftedCheckout ? "          ref: local/tool-row-visibility" : "          ref: dev";
       replacements += 1;
       return replacement;
     });
-    assert.equal(replacements, 2);
+    assert.equal(replacements, 3);
     writeFileSync(path, drifted);
-    assert.match(checkWorkflow(path).join("\n"), /both product checkout refs must be exactly dev/u);
+    assert.match(checkWorkflow(path).join("\n"), /all three product checkout refs must be exactly dev/u);
   }
 });
 
-test("the upstream sync workflow rejects a third inline checkout", () => {
+test("the upstream sync workflow rejects a fourth inline checkout", () => {
   const path = "/tmp/sync-upstream.yml";
   const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
-  const thirdCheckout = `      - uses: actions/checkout@${ACTION_SHA}
+  const fourthCheckout = `      - uses: actions/checkout@${ACTION_SHA}
         with:
-          ref: main
+          ref: dev
           persist-credentials: false
 `;
-  writeFileSync(path, source.replace("      - name: Fast-forward fork main from upstream\n", thirdCheckout + "      - name: Fast-forward fork main from upstream\n"));
-  assert.match(checkWorkflow(path).join("\n"), /both product checkout refs must be exactly dev/u);
+  writeFileSync(path, source.replace("      - name: Fast-forward fork main from upstream\n", fourthCheckout + "      - name: Fast-forward fork main from upstream\n"));
+  assert.match(checkWorkflow(path).join("\n"), /all three product checkout refs must be exactly dev/u);
 });
 
 test("the upstream sync workflow can never push to upstream", () => {

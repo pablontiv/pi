@@ -43,7 +43,8 @@ const UPSTREAM_ONLY_JOBS = {
   "remove-inprogress-on-close.yml": ["remove-label"],
 };
 const FORK_ONLY_JOBS = {
-  "sync-upstream.yml": ["sync-main", "sync-dev"],
+  "release-pion.yml": ["build", "stage-github-release", "publish-github-release", "cleanup-draft-github-release"],
+  "sync-upstream.yml": ["sync-main", "sync-dev", "tag-pion-release"],
 };
 const SCHEDULE_GUARD_EXEMPT_WORKFLOWS = new Set(["npm-audit.yml"]);
 const REQUIRED_CODEOWNERS = [
@@ -173,14 +174,10 @@ function jobBlocks(lines) {
 
 function hasRepositoryGuard(lines, job, repositories) {
   return lines.slice(job.start + 1, job.end).some((line) => {
-    return repositories.some((repository) => {
-      const escapedRepository = repository.replace("/", "\\/");
-      const guard = new RegExp(
-        `^\\s{4}if:\\s*\\$\\{\\{\\s*github\\.repository\\s*==\\s*['"]${escapedRepository}['"]\\s*(?:&&|\\}\\})`,
-        "u",
-      );
-      return guard.test(line);
-    });
+    const match = line.match(
+      /^\s{4}if:\s*\$\{\{\s*github\.repository\s*==\s*(['"])([^'"]+)\1\s*(?:&&|\}\})/u,
+    );
+    return match ? repositories.includes(match[2]) : false;
   });
 }
 
@@ -300,8 +297,8 @@ export function checkWorkflow(filePath) {
       const ref = checkoutBlock(lines, index).find((line) => /^\s+ref:\s*\S+\s*(?:#.*)?$/u.test(line));
       if (ref) checkoutRefs.push(ref.replace(/^\s+ref:\s*/u, "").split(/\s+#/u, 1)[0]);
     }
-    if (checkoutRefs.length !== 2 || checkoutRefs.some((ref) => unquote(ref) !== "dev")) {
-      errors.push(`${fileName}: both product checkout refs must be exactly dev`);
+    if (checkoutRefs.length !== 3 || checkoutRefs.some((ref) => unquote(ref) !== "dev")) {
+      errors.push(`${fileName}: all three product checkout refs must be exactly dev`);
     }
   }
   if (filePath.endsWith("/pr-gate.yml")) {

@@ -198,3 +198,89 @@ jobs:
         run: |
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             --delete "refs/heads/${CANDIDATE_BRANCH}"
+
+  tag-pion-release:
+    if: ${{ github.repository == 'pablontiv/pi' }}
+    needs: sync-dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout current Pion dev source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Validate latest upstream release and tag dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          release="$(gh api repos/earendil-works/pi/releases/latest)"
+          jq -e '.draft == false and .prerelease == false' <<< "${release}" >/dev/null
+          published_at="$(jq -er '.published_at | select(type == "string")' <<< "${release}")"
+          if [[ ! "${published_at}" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$ ]]; then
+            echo "::error::Latest upstream release published_at is not canonical UTC RFC3339: ${published_at}"
+            exit 1
+          fi
+          if ! published_at_round_trip="$(date --utc --date="${published_at}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" ||
+            [[ "${published_at_round_trip}" != "${published_at}" ]]; then
+            echo "::error::Latest upstream release published_at is not a valid calendar timestamp: ${published_at}"
+            exit 1
+          fi
+          upstream_tag="$(jq -er '.tag_name' <<< "${release}")"
+          if [[ ! "${upstream_tag}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Latest upstream release has a noncanonical tag: ${upstream_tag}"
+            exit 1
+          fi
+          version="${upstream_tag#v}"
+          pion_tag="pion-${upstream_tag}"
+
+          git fetch --no-tags origin +refs/heads/dev:refs/remotes/origin/dev
+          dev_commit="$(git rev-parse refs/remotes/origin/dev)"
+          git checkout --detach "${dev_commit}"
+          git fetch --no-tags https://github.com/earendil-works/pi.git \
+            "+refs/tags/${upstream_tag}:refs/pion-upstream-release"
+          upstream_commit="$(git rev-list -n 1 refs/pion-upstream-release)"
+          if ! git merge-base --is-ancestor "${upstream_commit}" "${dev_commit}"; then
+            echo "::error::dev does not yet contain upstream ${upstream_tag}."
+            exit 1
+          fi
+          node scripts/create-pion-release.mjs --validate-source --version "${version}"
+
+          if git ls-remote --exit-code --refs origin "refs/tags/${pion_tag}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "+refs/tags/${pion_tag}:refs/pion-existing-release"
+            existing_commit="$(git rev-list -n 1 refs/pion-existing-release)"
+            git merge-base --is-ancestor "${upstream_commit}" "${existing_commit}"
+            git merge-base --is-ancestor "${existing_commit}" "${dev_commit}"
+            echo "Existing ${pion_tag} is a valid recoverable release tag."
+            exit 0
+          fi
+
+          git fetch --no-tags origin +refs/heads/dev:refs/remotes/origin/dev
+          test "$(git rev-parse refs/remotes/origin/dev)" = "${dev_commit}"
+          test -n "${PION_SYNC_DEPLOY_KEY}"
+          key_path="${RUNNER_TEMP}/pion-sync-deploy-key"
+          known_hosts="${RUNNER_TEMP}/pion-sync-known-hosts"
+          trap 'rm -f "${key_path}" "${known_hosts}"' EXIT
+          printf '%s\n' "${PION_SYNC_DEPLOY_KEY}" > "${key_path}"
+          chmod 0600 "${key_path}"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "${known_hosts}"
+          git tag "${pion_tag}" "${dev_commit}"
+          if GIT_SSH_COMMAND="ssh -i ${key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}" \
+            git push "git@github.com:${GITHUB_REPOSITORY}.git" "refs/tags/${pion_tag}:refs/tags/${pion_tag}"; then
+            echo "Created ${pion_tag} at ${dev_commit}."
+          else
+            git fetch --no-tags origin "+refs/tags/${pion_tag}:refs/pion-concurrent-release"
+            test "$(git rev-list -n 1 refs/pion-concurrent-release)" = "${dev_commit}"
+            echo "Concurrent run created the same ${pion_tag} target."
+          fi
