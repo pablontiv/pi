@@ -18,7 +18,7 @@ export const EXPECTED_WORKFLOW_CONFLICTS = new Map([
   [
     ".github/workflows/env-daemons.yml",
     {
-      ours: "6fbdef2b51c3f6948e4eb455123cb1987e1d4906",
+      ours: "b8643c42eab72ee9fafe7b102351c8fc7ff320e2",
       theirs: "2164628d15effad2748455d3d76bbf9aed8c401d",
     },
   ],
@@ -31,9 +31,9 @@ export const EXPECTED_WORKFLOW_CONFLICTS = new Map([
   ],
 ]);
 
-function git(args) {
+function gitAt(root, args) {
   return execFileSync("git", args, {
-    cwd: ROOT,
+    cwd: root,
     encoding: "utf8",
     env: {
       ...process.env,
@@ -66,15 +66,23 @@ class ReconciliationError extends Error {
 
 export function planReconciliation(entries, expectations = EXPECTED_WORKFLOW_CONFLICTS) {
   const conflictPaths = [...new Set(entries.map((entry) => entry.path))].sort();
+  const expectedPaths = [...expectations.keys()].sort();
   if (entries.length === 0) {
-    throw new ReconciliationError("merge failed without any unmerged paths", "conflict-state", []);
+    throw new ReconciliationError("merge failed without any unmerged paths", "conflict-set", []);
+  }
+  if (
+    conflictPaths.length !== expectedPaths.length ||
+    conflictPaths.some((path, index) => path !== expectedPaths[index])
+  ) {
+    throw new ReconciliationError(
+      `merge conflict set changed; expected ${expectedPaths.join(", ")}; found ${conflictPaths.join(", ")}`,
+      "allowlist",
+      conflictPaths,
+    );
   }
 
   const stagesByPath = new Map();
   for (const entry of entries) {
-    if (!expectations.has(entry.path)) {
-      throw new ReconciliationError(`unexpected merge conflict: ${entry.path}`, "allowlist", conflictPaths);
-    }
     const stages = stagesByPath.get(entry.path) ?? new Map();
     if (stages.has(entry.stage)) {
       throw new ReconciliationError(
@@ -87,8 +95,7 @@ export function planReconciliation(entries, expectations = EXPECTED_WORKFLOW_CON
     stagesByPath.set(entry.path, stages);
   }
 
-  const paths = [...stagesByPath.keys()].sort();
-  for (const path of paths) {
+  for (const path of expectedPaths) {
     const stages = stagesByPath.get(path);
     const expected = expectations.get(path);
     if (!stages.has(2) || !stages.has(3)) {
@@ -113,29 +120,69 @@ export function planReconciliation(entries, expectations = EXPECTED_WORKFLOW_CON
       );
     }
   }
-  return paths;
+  return expectedPaths;
 }
 
-export function reconcile(mainSha) {
+function verifyPinnedTrees(mainSha, expectations, gitFn, conflictPaths) {
+  for (const [path, expected] of expectations) {
+    let ours;
+    let theirs;
+    try {
+      ours = gitFn(["rev-parse", `HEAD:${path}`]).trim();
+      theirs = gitFn(["rev-parse", `${mainSha}:${path}`]).trim();
+    } catch {
+      throw new ReconciliationError(`pinned workflow is absent from candidate or upstream: ${path}`, "blob-integrity", conflictPaths);
+    }
+    if (ours !== expected.ours) {
+      throw new ReconciliationError(`candidate tree blob changed for ${path}: ${ours}`, "blob-integrity", conflictPaths);
+    }
+    if (theirs !== expected.theirs) {
+      throw new ReconciliationError(`upstream tree blob changed for ${path}: ${theirs}`, "blob-integrity", conflictPaths);
+    }
+  }
+}
+
+export function reconcile(
+  mainSha,
+  {
+    root = ROOT,
+    expectations = EXPECTED_WORKFLOW_CONFLICTS,
+    gitFn = (args) => gitAt(root, args),
+  } = {},
+) {
   if (!SHA_PATTERN.test(mainSha)) throw new Error(`invalid main SHA: ${mainSha}`);
-  const expectedMain = git(["rev-parse", `${mainSha}^{commit}`]).trim();
-  const mergeHead = git(["rev-parse", "MERGE_HEAD"]).trim();
+  const expectedMain = gitFn(["rev-parse", `${mainSha}^{commit}`]).trim();
+  const mergeHead = gitFn(["rev-parse", "MERGE_HEAD"]).trim();
   if (mergeHead !== expectedMain) {
     throw new Error(`MERGE_HEAD ${mergeHead} does not match expected main ${expectedMain}`);
   }
 
-  const entries = parseUnmergedEntries(git(["ls-files", "--unmerged", "-z"]));
-  const paths = planReconciliation(entries);
+  const entries = parseUnmergedEntries(gitFn(["ls-files", "--unmerged", "-z"]));
+  const conflictPaths = [...new Set(entries.map((entry) => entry.path))].sort();
+  verifyPinnedTrees(expectedMain, expectations, gitFn, conflictPaths);
+  const paths = planReconciliation(entries, expectations);
   for (const path of paths) {
-    git(["checkout", "--ours", "--", path]);
-    git(["add", "--", path]);
-    const staged = git(["rev-parse", `:${path}`]).trim();
-    const expected = EXPECTED_WORKFLOW_CONFLICTS.get(path).ours;
-    if (staged !== expected) throw new Error(`failed to stage the verified candidate workflow for ${path}`);
+    gitFn(["checkout", "--ours", "--", path]);
+    gitFn(["add", "--", path]);
+    const staged = gitFn(["rev-parse", `:${path}`]).trim();
+    const expected = expectations.get(path).ours;
+    if (staged !== expected) {
+      throw new ReconciliationError(
+        `failed to stage the verified candidate workflow for ${path}`,
+        "staging-integrity",
+        conflictPaths,
+      );
+    }
   }
 
-  const remaining = parseUnmergedEntries(git(["ls-files", "--unmerged", "-z"]));
-  if (remaining.length > 0) throw new Error("unmerged paths remain after workflow reconciliation");
+  const remaining = parseUnmergedEntries(gitFn(["ls-files", "--unmerged", "-z"]));
+  if (remaining.length > 0) {
+    throw new ReconciliationError(
+      "unmerged paths remain after workflow reconciliation",
+      "residual-conflict",
+      [...new Set(remaining.map((entry) => entry.path))].sort(),
+    );
+  }
   console.log(`Reconciled verified workflow conflicts: ${paths.join(", ")}`);
 }
 

@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: env-daemons-${{ github.workflow }}-${{ github.ref }}
+  group: env-daemons-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
