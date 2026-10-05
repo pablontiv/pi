@@ -18,12 +18,13 @@ const CONFLICT_PATHS = [
   ".github/workflows/env.yml",
 ];
 
-function git(root, args) {
+function git(root, args, input) {
   return execFileSync("git", args, {
     cwd: root,
     encoding: "utf8",
+    input,
     env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
@@ -43,8 +44,9 @@ function conflictEntries(paths = [...EXPECTED_WORKFLOW_CONFLICTS.keys()]) {
   });
 }
 
-function createConflictedRepository(t) {
+function createConflictedRepository(t, { additionalConflictPaths = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi-upstream-reconcile-"));
+  const allConflictPaths = [...CONFLICT_PATHS, ...additionalConflictPaths].sort();
   t.after(() => rmSync(root, { recursive: true, force: true }));
   git(root, ["init", "--quiet", "--initial-branch=dev"]);
   git(root, ["config", "user.name", "Test User"]);
@@ -55,13 +57,13 @@ function createConflictedRepository(t) {
   git(root, ["commit", "--quiet", "-m", "base"]);
   const base = git(root, ["rev-parse", "HEAD"]).trim();
 
-  for (const path of CONFLICT_PATHS) write(root, path, `candidate ${path}\n`);
+  for (const path of allConflictPaths) write(root, path, `candidate ${path}\n`);
   git(root, ["add", "."]);
   git(root, ["commit", "--quiet", "-m", "candidate"]);
   const candidate = git(root, ["rev-parse", "HEAD"]).trim();
 
   git(root, ["checkout", "--quiet", "-b", "main", base]);
-  for (const path of CONFLICT_PATHS) write(root, path, `upstream ${path}\n`);
+  for (const path of allConflictPaths) write(root, path, `upstream ${path}\n`);
   git(root, ["add", "."]);
   git(root, ["commit", "--quiet", "-m", "upstream"]);
   const main = git(root, ["rev-parse", "HEAD"]).trim();
@@ -85,7 +87,7 @@ function createConflictedRepository(t) {
   assert.equal(merge.status, 1);
   assert.deepEqual(
     [...new Set(parseUnmergedEntries(git(root, ["ls-files", "--unmerged", "-z"])).map((entry) => entry.path))].sort(),
-    CONFLICT_PATHS,
+    allConflictPaths,
   );
   return { root, candidate, main, expectations };
 }
@@ -106,48 +108,6 @@ test("accepts only the complete verified workflow conflict set", () => {
   );
 });
 
-test("an unknown conflict exits nonzero and reports that promotion was blocked", () => {
-  const entries = conflictEntries();
-  entries.push({
-    mode: "100644",
-    object: "0123456789abcdef0123456789abcdef01234567",
-    stage: 2,
-    path: "package.json",
-  });
-  let summary = "";
-  const status = runCli(["--main", "0123456789abcdef0123456789abcdef01234567"], {
-    reconcileFn: () => planReconciliation(entries),
-    summaryPath: "/tmp/summary",
-    appendSummary: (_path, text) => {
-      summary += text;
-    },
-    logError: () => {},
-  });
-  assert.equal(status, 1);
-  assert.match(summary, /`package\.json`/u);
-  assert.match(summary, /allowlist check failed/u);
-  assert.match(summary, /synchronization and release were not promoted/u);
-});
-
-test("a changed upstream blob exits nonzero and reports the integrity failure", () => {
-  const entries = conflictEntries();
-  entries.find((entry) => entry.path === ".github/workflows/env-daemons.yml" && entry.stage === 3).object =
-    "0123456789abcdef0123456789abcdef01234567";
-  let summary = "";
-  const status = runCli(["--main", "0123456789abcdef0123456789abcdef01234567"], {
-    reconcileFn: () => planReconciliation(entries),
-    summaryPath: "/tmp/summary",
-    appendSummary: (_path, text) => {
-      summary += text;
-    },
-    logError: () => {},
-  });
-  assert.equal(status, 1);
-  assert.match(summary, /`\.github\/workflows\/env-daemons\.yml`/u);
-  assert.match(summary, /blob-integrity check failed/u);
-  assert.match(summary, /synchronization and release were not promoted/u);
-});
-
 test("rejects a changed candidate workflow blob", () => {
   const entries = conflictEntries();
   entries.find((entry) => entry.path === ".github/workflows/build-binaries.yml" && entry.stage === 2).object =
@@ -166,6 +126,26 @@ test("real reconciliation stages verified files and permits a two-parent merge c
   assert.equal(git(root, ["show", "-s", "--format=%P", "HEAD"]).trim(), `${candidate} ${main}`);
 });
 
+test("real CLI reconciliation rejects and reports an unknown conflicted path", (t) => {
+  const unknownPath = ".github/workflows/unexpected.yml";
+  const { root, main, expectations } = createConflictedRepository(t, {
+    additionalConflictPaths: [unknownPath],
+  });
+  let summary = "";
+  const status = runCli(["--main", main], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
+  assert.ok(summary.includes("`" + unknownPath + "`"));
+  assert.match(summary, /allowlist check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
+});
+
 test("real reconciliation rejects a MERGE_HEAD mismatch", (t) => {
   const { root, candidate, expectations } = createConflictedRepository(t);
   assert.throws(() => reconcile(candidate, { root, expectations }), /MERGE_HEAD .* does not match/u);
@@ -179,14 +159,54 @@ test("real reconciliation rejects an incomplete conflict set", (t) => {
   assert.throws(() => reconcile(main, { root, expectations }), /merge conflict set changed/u);
 });
 
-test("real reconciliation rejects changed pinned tree blobs before staging", (t) => {
+test("real CLI reconciliation rejects and reports a changed upstream tree blob", (t) => {
   const { root, main, expectations } = createConflictedRepository(t);
   const before = git(root, ["ls-files", "--unmerged", "-z"]);
   const changed = new Map(expectations);
   const path = CONFLICT_PATHS[1];
-  changed.set(path, { ...changed.get(path), theirs: "0123456789abcdef0123456789abcdef01234567" });
-  assert.throws(() => reconcile(main, { root, expectations: changed }), /upstream tree blob changed/u);
+  const previouslyPinnedBlob = git(root, ["hash-object", "-w", "--stdin"], "previous upstream workflow\n").trim();
+  changed.set(path, { ...changed.get(path), theirs: previouslyPinnedBlob });
+  let summary = "";
+  const status = runCli(["--main", main], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations: changed }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
+  assert.match(summary, /`\.github\/workflows\/env-daemons\.yml`/u);
+  assert.match(summary, /blob-integrity check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
   assert.equal(git(root, ["ls-files", "--unmerged", "-z"]), before);
+});
+
+test("real CLI reconciliation reports a post-stage blob-integrity failure", (t) => {
+  const { root, main, expectations } = createConflictedRepository(t);
+  const path = CONFLICT_PATHS[0];
+  const wrongBlob = git(root, ["hash-object", "-w", "--stdin"], "incorrect staged workflow\n").trim();
+  const gitFn = (args) => {
+    const result = git(root, args);
+    if (args[0] === "add" && args.at(-1) === path) {
+      git(root, ["update-index", "--cacheinfo", `100644,${wrongBlob},${path}`]);
+    }
+    return result;
+  };
+  let summary = "";
+  const status = runCli(["--main", main], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations, gitFn }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
+  assert.equal(git(root, ["rev-parse", `:${path}`]).trim(), wrongBlob);
+  assert.match(summary, /`\.github\/workflows\/build-binaries\.yml`/u);
+  assert.match(summary, /staging-integrity check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
 });
 
 test("real reconciliation rejects residual conflicts after attempted staging", (t) => {
