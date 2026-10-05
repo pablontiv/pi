@@ -29,6 +29,7 @@ const UPSTREAM_ONLY_JOBS = {
     "build",
     "smoke-test-binaries",
     "stage-github-release",
+    "env-daemons",
     "publish-npm",
     "announce-pi-dev-release",
     "publish-github-release",
@@ -238,10 +239,14 @@ export function checkWorkflow(filePath) {
   if (jobs.length === 0) errors.push(`${fileName}: no jobs found`);
   checkRepositoryGuards(filePath, lines, jobs, errors);
   for (const job of jobs) {
-    const hasTimeout = lines
-      .slice(job.start + 1, job.end)
-      .some((line) => /^    timeout-minutes:\s*[1-9][0-9]*\s*(?:#.*)?$/u.test(line));
-    if (!hasTimeout) errors.push(`${fileName}: job ${job.name} has no positive timeout-minutes`);
+    const jobLines = lines.slice(job.start + 1, job.end);
+    const callsReusableWorkflow = jobLines.some((line) => /^    uses:\s*\S+/u.test(line));
+    const hasTimeout = jobLines.some((line) => /^    timeout-minutes:\s*[1-9][0-9]*\s*(?:#.*)?$/u.test(line));
+    // GitHub does not support timeout-minutes on jobs that call reusable workflows.
+    // Their concrete jobs must carry timeouts in the called workflow instead.
+    if (!callsReusableWorkflow && !hasTimeout) {
+      errors.push(`${fileName}: job ${job.name} has no positive timeout-minutes`);
+    }
   }
 
   const actionReferences = [];

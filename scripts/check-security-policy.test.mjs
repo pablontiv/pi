@@ -69,6 +69,25 @@ test("the checker requires explicit permissions, concurrency, and job timeouts",
   assert.match(errors, /no positive timeout-minutes/u);
 });
 
+test("the checker permits reusable workflow call jobs without unsupported timeouts", () => {
+  const path = "/tmp/security-policy-reusable-workflow.yml";
+  writeFileSync(
+    path,
+    `name: reusable caller
+on: workflow_dispatch
+permissions:
+  contents: read
+concurrency:
+  group: reusable-caller
+  cancel-in-progress: true
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`,
+  );
+  assert.doesNotMatch(checkWorkflow(path).join("\n"), /no positive timeout-minutes/u);
+});
+
 test("the checker requires nonpersistent checkout credentials on the checkout step", () => {
   const path = "/tmp/security-policy-checkout.yml";
   writeFileSync(

@@ -103,7 +103,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --detach "${dev_sha}"
-          git merge --no-ff --no-edit "${main_sha}"
+          if git merge --no-ff --no-edit "${main_sha}"; then
+            echo "Upstream merged without conflicts."
+          else
+            node scripts/reconcile-upstream-workflow-conflicts.mjs --main "${main_sha}"
+            git diff --check --cached
+            git commit --no-edit
+          fi
 
           candidate_sha="$(git rev-parse HEAD)"
           candidate_branch="local/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
