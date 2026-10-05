@@ -146,17 +146,42 @@ test("real CLI reconciliation rejects and reports an unknown conflicted path", (
   assert.match(summary, /synchronization and release were not promoted/u);
 });
 
-test("real reconciliation rejects a MERGE_HEAD mismatch", (t) => {
+test("real CLI reconciliation reports a MERGE_HEAD mismatch", (t) => {
   const { root, candidate, expectations } = createConflictedRepository(t);
-  assert.throws(() => reconcile(candidate, { root, expectations }), /MERGE_HEAD .* does not match/u);
+  let summary = "";
+  const status = runCli(["--main", candidate], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
+  assert.match(summary, /Conflicting files: unavailable/u);
+  assert.match(summary, /reconciliation check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
 });
 
-test("real reconciliation rejects an incomplete conflict set", (t) => {
+test("real CLI reconciliation reports an incomplete conflict set", (t) => {
   const { root, main, expectations } = createConflictedRepository(t);
   const resolvedEarly = CONFLICT_PATHS[2];
   git(root, ["checkout", "--ours", "--", resolvedEarly]);
   git(root, ["add", "--", resolvedEarly]);
-  assert.throws(() => reconcile(main, { root, expectations }), /merge conflict set changed/u);
+  let summary = "";
+  const status = runCli(["--main", main], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
+  assert.ok(summary.includes("`" + CONFLICT_PATHS[0] + "`"));
+  assert.ok(summary.includes("`" + CONFLICT_PATHS[1] + "`"));
+  assert.match(summary, /allowlist check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
 });
 
 test("real CLI reconciliation rejects and reports a changed upstream tree blob", (t) => {
@@ -209,7 +234,7 @@ test("real CLI reconciliation reports a post-stage blob-integrity failure", (t) 
   assert.match(summary, /synchronization and release were not promoted/u);
 });
 
-test("real reconciliation rejects residual conflicts after attempted staging", (t) => {
+test("real CLI reconciliation reports residual conflicts after attempted staging", (t) => {
   const { root, main, expectations } = createConflictedRepository(t);
   const skipped = CONFLICT_PATHS[2];
   const gitFn = (args) => {
@@ -217,9 +242,18 @@ test("real reconciliation rejects residual conflicts after attempted staging", (
     if (args[0] === "rev-parse" && args[1] === `:${skipped}`) return `${expectations.get(skipped).ours}\n`;
     return git(root, args);
   };
-  assert.throws(
-    () => reconcile(main, { root, expectations, gitFn }),
-    /unmerged paths remain after workflow reconciliation/u,
-  );
+  let summary = "";
+  const status = runCli(["--main", main], {
+    reconcileFn: (sha) => reconcile(sha, { root, expectations, gitFn }),
+    summaryPath: "/tmp/summary",
+    appendSummary: (_path, text) => {
+      summary += text;
+    },
+    logError: () => {},
+  });
+  assert.equal(status, 1);
   assert.match(git(root, ["ls-files", "--unmerged"]), new RegExp(skipped.replaceAll(".", "\\."), "u"));
+  assert.ok(summary.includes("`" + skipped + "`"));
+  assert.match(summary, /residual-conflict check failed/u);
+  assert.match(summary, /synchronization and release were not promoted/u);
 });
