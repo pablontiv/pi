@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -228,6 +229,31 @@ function checkoutBlock(lines, index) {
   return block;
 }
 
+function parseStepLines(lines) {
+  if (lines.some((line) => line.trim() && !line.startsWith("      "))) return undefined;
+  const source = lines.map((line) => (line.startsWith("      ") ? line.slice(6) : line)).join("\n");
+  let document;
+  try {
+    document = parseDocument(source, {
+      keepSourceTokens: true,
+      logLevel: "silent",
+      strict: true,
+      stringKeys: true,
+      uniqueKeys: true,
+    });
+  } catch {
+    return undefined;
+  }
+  if (document.errors.length > 0 || document.warnings.length > 0 || !isSeq(document.contents)) return undefined;
+  const sequence = document.contents;
+  if (sequence.items.length !== 1 || !isMap(sequence.items[0])) return undefined;
+  const mapping = sequence.items[0];
+  if (mapping.items.some((pair) => !isScalar(pair.key) || typeof pair.key.value !== "string")) return undefined;
+  const keys = mapping.items.map((pair) => pair.key.value);
+  if (new Set(keys).size !== keys.length) return undefined;
+  return { mapping, sequence };
+}
+
 function jobSteps(lines, job) {
   const starts = [];
   for (let index = job.start + 1; index < job.end; index += 1) {
@@ -235,42 +261,49 @@ function jobSteps(lines, job) {
   }
   return starts.map((start, position) => {
     const end = starts[position + 1] ?? job.end;
-    const first = lines[start];
-    const inlineName = first.match(/^      - name:\s*(.+?)\s*$/u)?.[1];
-    const followingName = lines.slice(start + 1, end).find((line) => /^        name:\s*/u.test(line));
-    const name = inlineName ?? followingName?.replace(/^        name:\s*/u, "").trim();
-    return { start, end, name: name ? unquote(name) : undefined, lines: lines.slice(start, end) };
+    const stepLines = lines.slice(start, end);
+    const parsed = parseStepLines(stepLines);
+    const namePair = parsed?.mapping.items.find((pair) => pair.key.value === "name");
+    const name = namePair && isScalar(namePair.value) && typeof namePair.value.value === "string" ? namePair.value.value : undefined;
+    return { start, end, name, lines: stepLines, parsed };
   });
 }
 
 function activeRunLines(step) {
-  const runIndex = step.lines.findIndex((line) => /^        run:\s*\|\s*$/u.test(line));
-  if (runIndex < 0) return [];
-  return step.lines
-    .slice(runIndex + 1)
-    .map((line) => line.replace(/^          /u, ""))
+  const parsed = step.parsed ?? parseStepLines(step.lines);
+  const runPair = parsed?.mapping.items.find((pair) => pair.key.value === "run");
+  if (!runPair || !isScalar(runPair.value) || typeof runPair.value.value !== "string") return [];
+  return runPair.value.value
+    .split(/\r?\n/u)
     .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
 }
 
-function stepHeaders(step) {
-  return step.lines
-    .filter((line, index) => index === 0 || /^        [A-Za-z0-9_-]+:/u.test(line))
-    .map((line) => line.trim());
+function scalarMatches(node, value, type) {
+  return isScalar(node) && node.value === value && (!type || node.type === type) && !node.anchor && !node.tag;
 }
 
-function stepMapping(step, key) {
-  const start = step.lines.findIndex((line) => line === `        ${key}:`);
-  if (start < 0) return [];
-  const result = [];
-  for (let index = start + 1; index < step.lines.length; index += 1) {
-    if (/^        [A-Za-z0-9_-]+:/u.test(step.lines[index])) break;
-    if (step.lines[index].trim() && !step.lines[index].trimStart().startsWith("#")) result.push(step.lines[index].trim());
+function mappingMatches(mapping, expectedEntries) {
+  if (!isMap(mapping) || mapping.flow || mapping.anchor || mapping.tag || mapping.items.length !== expectedEntries.length) return false;
+  return mapping.items.every((pair, index) => {
+    const [expectedKey, expectedValue] = expectedEntries[index];
+    return scalarMatches(pair.key, expectedKey) && scalarMatches(pair.value, expectedValue);
+  });
+}
+
+function criticalStepMatches(step, contract) {
+  const parsed = step.parsed ?? parseStepLines(step.lines);
+  if (!parsed || parsed.sequence.flow || parsed.sequence.anchor || parsed.sequence.tag || parsed.mapping.flow) return false;
+  const keys = parsed.mapping.items.map((pair) => pair.key.value);
+  if (keys.join("\n") !== contract.keys.join("\n")) return false;
+  for (const pair of parsed.mapping.items) {
+    const key = pair.key.value;
+    if (!scalarMatches(pair.key, key)) return false;
+    if (key === "name" && !scalarMatches(pair.value, contract.name)) return false;
+    if (key === "id" && !scalarMatches(pair.value, contract.id)) return false;
+    if (key === "env" && !mappingMatches(pair.value, contract.env)) return false;
+    if (key === "run" && !scalarMatches(pair.value, pair.value?.value, "BLOCK_LITERAL")) return false;
   }
-  return result;
-}
-
-function activeBodyDigest(step) {
-  return createHash("sha256").update(activeRunLines(step).join("\n")).digest("hex");
+  return createHash("sha256").update(activeRunLines(step).join("\n")).digest("hex") === contract.bodyDigest;
 }
 
 function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
@@ -318,41 +351,43 @@ function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
     {
       jobName: "sync-dev",
       name: "Classify merge candidate",
-      headers: ["- name: Classify merge candidate", "id: candidate", "env:", "run: |"],
-      env: ["SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}"],
+      keys: ["name", "id", "env", "run"],
+      id: "candidate",
+      env: [["SYNCED_MAIN_SHA", "${{ needs.sync-main.outputs.main_sha }}"]],
       bodyDigest: "9f950a78888f3df66873c947235dd0227e8b03aab99a2f78b0ca9fae8f709b96",
     },
     {
       jobName: "prepare-pion-tag",
       name: "Prepare Pion tag publication",
-      headers: ["- name: Prepare Pion tag publication", "id: prepare", "env:", "run: |"],
-      env: ["GH_TOKEN: ${{ github.token }}"],
+      keys: ["name", "id", "env", "run"],
+      id: "prepare",
+      env: [["GH_TOKEN", "${{ github.token }}"]],
       bodyDigest: "b5775348f4f9be20057244461032553e5a010715b56e36306c52f6707b2cbd1c",
     },
     {
       jobName: "publish-pion-tag",
       name: "Prepare trusted tag publication state",
-      headers: ["- name: Prepare trusted tag publication state", "env:", "run: |"],
+      keys: ["name", "env", "run"],
       env: [
-        "DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}",
-        "UPSTREAM_SHA: ${{ needs.prepare-pion-tag.outputs.upstream_sha }}",
-        "UPSTREAM_TAG: ${{ needs.prepare-pion-tag.outputs.upstream_tag }}",
-        "VERSION: ${{ needs.prepare-pion-tag.outputs.version }}",
-        "PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}",
-        "SOURCE_VALIDATED: ${{ needs.prepare-pion-tag.outputs.source_validated }}",
-        "RELEASE_ELIGIBLE: ${{ needs.prepare-pion-tag.outputs.release_eligible }}",
-        "PUBLISH_REQUIRED: ${{ needs.prepare-pion-tag.outputs.publish_required }}",
+        ["DEV_SHA", "${{ needs.prepare-pion-tag.outputs.dev_sha }}"],
+        ["UPSTREAM_SHA", "${{ needs.prepare-pion-tag.outputs.upstream_sha }}"],
+        ["UPSTREAM_TAG", "${{ needs.prepare-pion-tag.outputs.upstream_tag }}"],
+        ["VERSION", "${{ needs.prepare-pion-tag.outputs.version }}"],
+        ["PION_TAG", "${{ needs.prepare-pion-tag.outputs.pion_tag }}"],
+        ["SOURCE_VALIDATED", "${{ needs.prepare-pion-tag.outputs.source_validated }}"],
+        ["RELEASE_ELIGIBLE", "${{ needs.prepare-pion-tag.outputs.release_eligible }}"],
+        ["PUBLISH_REQUIRED", "${{ needs.prepare-pion-tag.outputs.publish_required }}"],
       ],
       bodyDigest: "0295ad4dae23eb65c43d36deef83f81ec9d2213eb2f209726947b4728646f730",
     },
     {
       jobName: "publish-pion-tag",
       name: "Publish exact Pion tag",
-      headers: ["- name: Publish exact Pion tag", "env:", "run: |"],
+      keys: ["name", "env", "run"],
       env: [
-        "DEV_SHA: ${{ needs.prepare-pion-tag.outputs.dev_sha }}",
-        "PION_TAG: ${{ needs.prepare-pion-tag.outputs.pion_tag }}",
-        "PION_SYNC_DEPLOY_KEY: ${{ secrets.PION_SYNC_DEPLOY_KEY }}",
+        ["DEV_SHA", "${{ needs.prepare-pion-tag.outputs.dev_sha }}"],
+        ["PION_TAG", "${{ needs.prepare-pion-tag.outputs.pion_tag }}"],
+        ["PION_SYNC_DEPLOY_KEY", "${{ secrets.PION_SYNC_DEPLOY_KEY }}"],
       ],
       bodyDigest: "e536ce601a692897e26ea03a301d359deab2bdb2c88be3c48ccfb8951cff1473",
     },
@@ -362,9 +397,7 @@ function checkSyncUpstreamContract(lines, jobs, fileName, errors) {
     const step = matches[0];
     if (
       matches.length !== 1 ||
-      stepHeaders(step).join("\n") !== contract.headers.join("\n") ||
-      stepMapping(step, "env").join("\n") !== contract.env.join("\n") ||
-      activeBodyDigest(step) !== contract.bodyDigest
+      !criticalStepMatches(step, contract)
     ) {
       errors.push(`${fileName}: ${contract.name} must exactly match its security-reviewed structure and active command body`);
     }

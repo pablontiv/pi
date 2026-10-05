@@ -201,9 +201,20 @@ test("the upstream sync workflow rejects unnamed and extra action steps", () => 
 test("critical sync steps reject unexpected control attributes and execution combinations", () => {
   const path = "/tmp/sync-upstream.yml";
   const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const quotedAttributes = [
+    ["'if'", "${{ github.repository != github.repository }}"],
+    ['"if"', "${{ github.repository != github.repository }}"],
+    ["'continue-on-error'", "true"],
+    ['"continue-on-error"', "true"],
+    ["'shell'", "bash"],
+    ['"shell"', "bash"],
+  ];
   const mutations = [
     source.replace("      - name: Classify merge candidate\n", "      - name: Classify merge candidate\n        if: ${{ false }}\n"),
     source.replace("      - name: Classify merge candidate\n", "      - name: Classify merge candidate\n        continue-on-error: true\n"),
+    ...quotedAttributes.map(([key, value]) =>
+      source.replace("      - name: Classify merge candidate\n", `      - name: Classify merge candidate\n        ${key}: ${value}\n`),
+    ),
     source.replace("        id: candidate\n", "        id: candidate\n        with:\n          unsafe: true\n"),
     source.replace(
       "          SYNCED_MAIN_SHA: ${{ needs.sync-main.outputs.main_sha }}\n",
@@ -214,6 +225,42 @@ test("critical sync steps reject unexpected control attributes and execution com
     writeFileSync(path, mutated);
     assert.match(checkWorkflow(path).join("\n"), /Classify merge candidate must exactly match/u);
   }
+});
+
+test("critical step schema normalizes allowed quoted name and run keys", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const start = source.indexOf("      - name: Classify merge candidate\n");
+  const end = source.indexOf("\n      - name: Publish merge candidate", start);
+  assert.ok(start >= 0 && end > start);
+  const quotedStep = source
+    .slice(start, end)
+    .replace("      - name:", "      - 'name':")
+    .replace("        run: |", '        "run": |');
+  writeFileSync(path, `${source.slice(0, start)}${quotedStep}${source.slice(end)}`);
+  assert.deepEqual(checkWorkflow(path), []);
+});
+
+test("critical step schema rejects flow-style and duplicate-key forms", () => {
+  const path = "/tmp/sync-upstream.yml";
+  const source = readFileSync(`${ROOT}/.github/workflows/sync-upstream.yml`, "utf8");
+  const start = source.indexOf("      - name: Classify merge candidate\n");
+  const end = source.indexOf("\n      - name: Publish merge candidate", start);
+  assert.ok(start >= 0 && end > start);
+  const flowStep = '      - { name: Classify merge candidate, id: candidate, env: { SYNCED_MAIN_SHA: "${{ needs.sync-main.outputs.main_sha }}" }, run: "node scripts/classify-upstream-merge.mjs" }';
+  writeFileSync(path, `${source.slice(0, start)}${flowStep}${source.slice(end)}`);
+  assert.match(checkWorkflow(path).join("\n"), /Classify merge candidate must exactly match/u);
+
+  const duplicate = source.replace(
+    "      - name: Classify merge candidate\n",
+    "      - name: Classify merge candidate\n        'name': Classify merge candidate\n",
+  );
+  writeFileSync(path, duplicate);
+  assert.match(checkWorkflow(path).join("\n"), /unnamed step|security-reviewed order/u);
+
+  const malformed = source.replace("      - name: Classify merge candidate\n", "      - name: [\n");
+  writeFileSync(path, malformed);
+  assert.match(checkWorkflow(path).join("\n"), /unnamed step|security-reviewed order/u);
 });
 
 test("critical sync steps reject extra active commands and persisted runner state", () => {
