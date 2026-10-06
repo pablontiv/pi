@@ -11,7 +11,6 @@ import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 import { getReadmePath } from "../src/config.ts";
-import type { TranscriptBlockDescriptor } from "../src/core/extensions/transcript-presentation.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
@@ -103,6 +102,204 @@ describe("ToolExecutionComponent parity", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("custom call");
 		expect(rendered).toContain("custom result");
+	});
+
+	test("uses the native row with effective renderers when renderRow returns undefined", () => {
+		const renderRow = vi.fn(() => undefined);
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-native-row",
+			{ query: "pi" },
+			{},
+			{
+				renderRow,
+				renderCall: () => new Text("effective call", 0, 0),
+				renderResult: () => new Text("effective result", 0, 0),
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		expect(renderRow).toHaveBeenCalledTimes(1);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("effective call");
+
+		component.updateResult({ content: [{ type: "text", text: "native" }], isError: false });
+		expect(renderRow).toHaveBeenCalledTimes(2);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("effective call");
+		expect(rendered).toContain("effective result");
+	});
+
+	test("remounts every row structure when the effective renderer changes", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-structure-transitions",
+			{ query: "pi" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false });
+		component.setExpanded(true);
+		const rendered = () => stripAnsi(component.render(120).join("\n"));
+
+		expect(rendered()).toContain("custom_tool");
+		expect(rendered()).toContain("done");
+
+		component.setToolDefinition({
+			renderCall: (_args, _theme, context) => new Text(`default shell ${context.expanded}`, 0, 0),
+			renderResult: () => new Text("default result", 0, 0),
+		});
+		expect(rendered()).toContain("default shell true");
+		expect(rendered()).toContain("default result");
+		expect(rendered()).not.toContain("custom_tool");
+
+		component.setToolDefinition({
+			renderShell: "self",
+			renderCall: () => new Text("self shell", 0, 0),
+			renderResult: () => new Text("self result", 0, 0),
+		});
+		expect(rendered()).toContain("self shell");
+		expect(rendered()).toContain("self result");
+		expect(rendered()).not.toContain("default shell");
+
+		component.setToolDefinition({ renderRow: () => new Text("complete row", 0, 0) });
+		expect(rendered().trimEnd()).toBe("complete row");
+
+		component.setToolDefinition({
+			renderRow: () => undefined,
+			renderCall: () => new Text("native after row", 0, 0),
+			renderResult: () => new Text("native result after row", 0, 0),
+		});
+		expect(rendered()).toContain("native after row");
+		expect(rendered()).toContain("native result after row");
+		expect(rendered()).not.toContain("complete row");
+
+		component.setToolDefinition({ renderRow: () => new Text("", 0, 0) });
+		expect(component.render(120)).toEqual([]);
+
+		component.setToolDefinition(undefined);
+		expect(rendered()).toContain("custom_tool");
+		expect(rendered()).toContain("done");
+	});
+
+	test("passes only content and details to renderRow and keeps errors in context", () => {
+		const received: Array<{ keys: string[]; isError: boolean; details: unknown }> = [];
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-row-result-shape",
+			{},
+			{},
+			{
+				renderRow: (_args, result, _theme, context) => {
+					if (result) {
+						received.push({ keys: Object.keys(result), isError: context.isError, details: result.details });
+					}
+					return undefined;
+				},
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({
+			content: [{ type: "text", text: "failed" }],
+			details: { code: "E_TEST" },
+			isError: true,
+		});
+
+		expect(received).toEqual([{ keys: ["content", "details"], isError: true, details: { code: "E_TEST" } }]);
+	});
+
+	test("renderRow replaces the complete row and automatic images", () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-full-row",
+			{},
+			{},
+			{
+				renderCall: () => new Text("native call", 0, 0),
+				renderResult: () => new Text("native result", 0, 0),
+				renderRow: (_args, result) =>
+					result ? new Text(`whole row: ${result.content[0]?.type}`, 0, 0) : new Text("whole row", 0, 0),
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({
+			content: [{ type: "image", data: TINY_JPEG, mimeType: "image/jpeg" }],
+			isError: false,
+		});
+
+		expect(component.render(120).map((line) => stripAnsi(line).trimEnd())).toEqual(["whole row: image"]);
+	});
+
+	test("an empty renderRow component hides the row without space", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-empty-row",
+			{},
+			{},
+			{ renderRow: () => new Text("", 0, 0) },
+			createFakeTui(),
+			process.cwd(),
+		);
+		expect(component.render(120)).toEqual([]);
+	});
+
+	test("a renderRow exception falls back to the native error row", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-throwing-row",
+			{},
+			{},
+			{
+				renderRow: () => {
+					throw new Error("row failed");
+				},
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "tool failed" }], isError: true });
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("custom_tool");
+		expect(rendered).toContain("tool failed");
+	});
+
+	test("renderer reevaluation preserves row state, arguments, result, and expansion", () => {
+		type State = { count?: number };
+		const seen: Array<{ args: unknown; text: string | undefined; expanded: boolean; count: number }> = [];
+		const renderRow: NonNullable<ToolDefinition<any, unknown, State>["renderRow"]> = (
+			args,
+			result,
+			_theme,
+			context,
+		) => {
+			context.state.count = (context.state.count ?? 0) + 1;
+			seen.push({
+				args,
+				text: result?.content[0]?.type === "text" ? result.content[0].text : undefined,
+				expanded: context.expanded,
+				count: context.state.count,
+			});
+			return new Text(`row ${context.state.count}`, 0, 0);
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-reevaluate",
+			{ query: "first" },
+			{},
+			{ renderRow },
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateArgs({ query: "second" });
+		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false });
+		component.setExpanded(true);
+		component.setToolDefinition({ renderRow });
+
+		expect(seen.at(-1)).toEqual({ args: { query: "second" }, text: "done", expanded: true, count: 5 });
 	});
 
 	test("self-rendered empty tool rows take no layout space", () => {
@@ -464,35 +661,6 @@ describe("ToolExecutionComponent parity", () => {
 		const textLine = expandedLines.findIndex((line) => line.endsWith("  text: line one"));
 		expect(textLine).toBeGreaterThan(-1);
 		expect(expandedLines[textLine + 1]).toMatch(/^\s+ {4}line two$/);
-	});
-
-	test("provides a stable tool descriptor for each execution state", () => {
-		const component = new ToolExecutionComponent(
-			"custom_tool",
-			"tool-descriptor",
-			{},
-			{},
-			undefined,
-			createFakeTui(),
-			process.cwd(),
-		);
-
-		const pending: TranscriptBlockDescriptor = component.getTranscriptDescriptor();
-		expect(pending).toEqual({
-			id: "tool-descriptor",
-			kind: "tool",
-			toolName: "custom_tool",
-			state: "pending",
-			capabilities: { summary: true, expandable: true },
-		});
-
-		component.updateResult({ content: [], isError: false }, true);
-		expect(component.getTranscriptDescriptor().state).toBe("pending");
-		component.updateResult({ content: [], isError: false }, false);
-		expect(component.getTranscriptDescriptor().state).toBe("success");
-		component.updateResult({ content: [], isError: true }, false);
-		expect(component.getTranscriptDescriptor().state).toBe("error");
-		expect(component.getTranscriptDescriptor()).not.toBe(pending);
 	});
 
 	test("reports its current expansion state", () => {

@@ -42,17 +42,17 @@ describe("SettingsManager - External Edit Preservation", () => {
 		const originalLockSync = lockfile.lockSync.bind(lockfile);
 		let startSecondWriter = true;
 		let firstCallbackCalls = 0;
-		const writeSetting = (current: string | undefined, key: string, value: number): string => {
+		const writeSetting = (current: string | undefined, key: string, value: boolean): string => {
 			const settings = current ? JSON.parse(current) : {};
 			return JSON.stringify({
 				...settings,
-				extensionSettings: { ...settings.extensionSettings, [key]: value },
+				warnings: { ...settings.warnings, [key]: value },
 			});
 		};
 		const lockSpy = vi.spyOn(lockfile, "lockSync").mockImplementation((path, options) => {
 			if (startSecondWriter) {
 				startSecondWriter = false;
-				second.withLock("global", (current) => writeSetting(current, "second.value", 2));
+				second.withLock("global", (current) => writeSetting(current, "secondWarning", true));
 			}
 			return originalLockSync(path, options);
 		});
@@ -61,16 +61,16 @@ describe("SettingsManager - External Edit Preservation", () => {
 			expect(existsSync(settingsPath)).toBe(false);
 			first.withLock("global", (current) => {
 				firstCallbackCalls++;
-				return writeSetting(current, "first.value", 1);
+				return writeSetting(current, "firstWarning", true);
 			});
 		} finally {
 			lockSpy.mockRestore();
 		}
 
 		expect(firstCallbackCalls).toBe(1);
-		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensionSettings).toEqual({
-			"second.value": 2,
-			"first.value": 1,
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).warnings).toEqual({
+			secondWarning: true,
+			firstWarning: true,
 		});
 	});
 

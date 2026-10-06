@@ -10,7 +10,6 @@ import { fileURLToPath } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
-import type { Static, TSchema } from "typebox";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
@@ -18,15 +17,9 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
-import type { SettingsScope } from "../settings-manager.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
-import {
-	cloneExtensionSettingDefinition,
-	type ExtensionSettingDefinition,
-	type ExtensionSettingHandle,
-} from "./extension-settings.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -40,8 +33,8 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolRendererRegistration,
 	ToolRendererResolver,
-	TranscriptPresentationPolicyRegistration,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -184,9 +177,6 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getActiveTools: notInitialized,
 		getAllTools: notInitialized,
 		getSettings: notInitialized,
-		getExtensionSetting: notInitialized,
-		setExtensionSetting: notInitialized,
-		onExtensionSettingChange: notInitialized,
 		setActiveTools: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
@@ -220,7 +210,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			eventBusUnsubscribers.add(trackedUnsubscribe);
 			return trackedUnsubscribe;
 		},
-		invalidateTranscriptPresentation: () => {},
+		invalidateToolRenderers: () => {},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
 		registerProvider: (name, config, extensionPath = "<unknown>") => {
@@ -296,47 +286,6 @@ function createExtensionAPI(
 				handlers.splice(handlerIndex, 1);
 				if (handlers.length === 0) extension.handlers.delete(event);
 			};
-		},
-
-		registerSetting<TSchemaType extends TSchema>(
-			definition: ExtensionSettingDefinition<TSchemaType>,
-		): ExtensionSettingHandle<Static<TSchemaType>> {
-			if (state !== "loading") {
-				throw new Error(`Extension settings may only be registered during extension initialization.`);
-			}
-			const clonedDefinition = cloneExtensionSettingDefinition(definition);
-			extension.settings ??= new Map();
-			const settings = extension.settings;
-			if (settings.has(clonedDefinition.key)) {
-				throw new Error(
-					`Extension setting "${clonedDefinition.key}" is already registered by extension "${extension.path}".`,
-				);
-			}
-			settings.set(
-				clonedDefinition.key,
-				Object.freeze({ definition: clonedDefinition, sourceInfo: extension.sourceInfo }),
-			);
-
-			const key = clonedDefinition.key;
-			return Object.freeze({
-				key,
-				get(): Static<TSchemaType> {
-					assertActive();
-					return runtime.getExtensionSetting(extension.path, key) as Static<TSchemaType>;
-				},
-				set(value: Static<TSchemaType>, options?: { scope?: SettingsScope }): void {
-					assertActive();
-					runtime.setExtensionSetting(extension.path, key, value, options?.scope ?? "global");
-				},
-				onChange(listener: (value: Static<TSchemaType>) => void): () => void {
-					assertActive();
-					return runtime.trackEventBusSubscription(
-						runtime.onExtensionSettingChange(extension.path, key, (value) =>
-							listener(value as Static<TSchemaType>),
-						),
-					);
-				},
-			});
 		},
 
 		registerTool(tool: ToolDefinition): void {
@@ -417,37 +366,16 @@ function createExtensionAPI(
 			extension.entryRenderers.set(customType, renderer as EntryRenderer);
 		},
 
-		registerTranscriptPresentationPolicy(policy): TranscriptPresentationPolicyRegistration {
-			assertActive();
-			if (state !== "loading") {
-				throw new Error("Transcript presentation policies can only be registered during extension loading.");
-			}
-			const registration = { policy, sourceInfo: extension.sourceInfo };
-			extension.transcriptPresentationPolicies ??= [];
-			extension.transcriptPresentationPolicies.push(registration);
-			let disposed = false;
-
-			return {
-				invalidate(): void {
-					assertActive();
-					runtime.invalidateTranscriptPresentation();
-				},
-				dispose(): void {
-					assertActive();
-					if (disposed) return;
-					disposed = true;
-					const registrations = extension.transcriptPresentationPolicies;
-					const index = registrations?.indexOf(registration) ?? -1;
-					if (index !== -1) registrations?.splice(index, 1);
-					runtime.invalidateTranscriptPresentation();
-				},
-			};
-		},
-
-		registerToolRenderer(resolver: ToolRendererResolver): void {
+		registerToolRenderer(resolver: ToolRendererResolver): ToolRendererRegistration {
 			assertActive();
 			extension.toolRenderers ??= [];
 			extension.toolRenderers.push(resolver);
+			return Object.freeze({
+				invalidate(): void {
+					assertActive();
+					runtime.invalidateToolRenderers();
+				},
+			});
 		},
 
 		// Flag access - checks extension registered it, reads from runtime

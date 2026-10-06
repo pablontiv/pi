@@ -25,16 +25,6 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
-import {
-	type ExtensionSettingRuntimeError,
-	type ExtensionSettingsActions,
-	ExtensionSettingsRegistry,
-} from "./extension-settings.ts";
-import {
-	applyTranscriptPresentationPolicies,
-	type TranscriptBlockDescriptor,
-	type TranscriptPresentation,
-} from "./transcript-presentation.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -80,7 +70,6 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	RegisteredTool,
-	RegisteredTranscriptPresentationPolicy,
 	ReplacedSessionContext,
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
@@ -225,7 +214,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
-export type TranscriptPresentationInvalidationListener = () => void;
+export type ToolRendererInvalidationListener = () => void;
 
 type BoundaryBaseEvent =
 	| Omit<TurnEndEvent, "entries" | "continue" | "context">
@@ -375,10 +364,9 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
-	private transcriptPresentationInvalidationListeners = new Set<TranscriptPresentationInvalidationListener>();
-	private disabledTranscriptPresentationPolicies = new Set<RegisteredTranscriptPresentationPolicy>();
-	private readonly notifyTranscriptPresentationInvalidated = () => {
-		for (const listener of this.transcriptPresentationInvalidationListeners) listener();
+	private toolRendererInvalidationListeners = new Set<ToolRendererInvalidationListener>();
+	private readonly notifyToolRenderersInvalidated = () => {
+		for (const listener of this.toolRendererInvalidationListeners) listener();
 	};
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
@@ -405,8 +393,6 @@ export class ExtensionRunner {
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
-	private readonly settingRegistry: ExtensionSettingsRegistry;
-	private pendingSettingErrors: ExtensionSettingRuntimeError[] = [];
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
@@ -417,12 +403,6 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
-		settingActions: ExtensionSettingsActions = {
-			getExtensionSettingLayers: () => ({ global: undefined, project: undefined }),
-			setExtensionSetting: () => {
-				throw new Error("Extension settings are not bound to persistent storage.");
-			},
-		},
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -430,15 +410,7 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
-		this.settingRegistry = new ExtensionSettingsRegistry(extensions, settingActions, (error) =>
-			this.reportSettingError(error),
-		);
-		this.runtime.getExtensionSetting = (extensionPath, key) => this.settingRegistry.get(extensionPath, key);
-		this.runtime.setExtensionSetting = (extensionPath, key, value, scope) =>
-			this.settingRegistry.set(extensionPath, key, value, scope);
-		this.runtime.onExtensionSettingChange = (extensionPath, key, listener) =>
-			this.settingRegistry.onChange(extensionPath, key, listener);
-		this.runtime.invalidateTranscriptPresentation = this.notifyTranscriptPresentationInvalidated;
+		this.runtime.invalidateToolRenderers = this.notifyToolRenderersInvalidated;
 	}
 
 	bindCore(
@@ -461,10 +433,7 @@ export class ExtensionRunner {
 		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
-		this.runtime.getSettings = () => {
-			const { extensionSettings: _extensionSettings, ...settings } = actions.getSettings();
-			return settings;
-		};
+		this.runtime.getSettings = actions.getSettings;
 		this.runtime.setActiveTools = actions.setActiveTools;
 		this.runtime.refreshTools = actions.refreshTools;
 		this.runtime.getCommands = actions.getCommands;
@@ -663,24 +632,6 @@ export class ExtensionRunner {
 		return this.extensions.map((e) => e.path);
 	}
 
-	getRegisteredSettings() {
-		return this.settingRegistry.getRegisteredSettings();
-	}
-
-	getSettingDiagnostics(): readonly ResourceDiagnostic[] {
-		return this.settingRegistry.getDiagnostics();
-	}
-
-	getExtensionSettingValue(key: string): unknown {
-		this.assertActive();
-		return this.settingRegistry.getValue(key);
-	}
-
-	setExtensionSettingValue(key: string, value: unknown): void {
-		this.assertActive();
-		this.settingRegistry.setValue(key, value);
-	}
-
 	/** Get all registered tools from all extensions (first registration per name wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
@@ -779,12 +730,11 @@ export class ExtensionRunner {
 	): void {
 		if (!this.staleMessage) {
 			this.staleMessage = message;
-			this.transcriptPresentationInvalidationListeners.clear();
-			if (this.runtime.invalidateTranscriptPresentation === this.notifyTranscriptPresentationInvalidated) {
-				this.runtime.invalidateTranscriptPresentation = () => {};
+			this.toolRendererInvalidationListeners.clear();
+			if (this.runtime.invalidateToolRenderers === this.notifyToolRenderersInvalidated) {
+				this.runtime.invalidateToolRenderers = () => {};
 			}
 			this.runtime.invalidate(message);
-			this.settingRegistry.clearListeners();
 		}
 	}
 
@@ -794,27 +744,15 @@ export class ExtensionRunner {
 		}
 	}
 
-	onTranscriptPresentationInvalidated(listener: TranscriptPresentationInvalidationListener): () => void {
-		this.transcriptPresentationInvalidationListeners.add(listener);
-		return () => this.transcriptPresentationInvalidationListeners.delete(listener);
+	onToolRenderersInvalidated(listener: ToolRendererInvalidationListener): () => void {
+		this.assertActive();
+		this.toolRendererInvalidationListeners.add(listener);
+		return () => this.toolRendererInvalidationListeners.delete(listener);
 	}
 
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
-		if (this.pendingSettingErrors.length > 0) {
-			const pending = this.pendingSettingErrors;
-			this.pendingSettingErrors = [];
-			for (const error of pending) this.emitError(error);
-		}
 		return () => this.errorListeners.delete(listener);
-	}
-
-	private reportSettingError(error: ExtensionSettingRuntimeError): void {
-		if (this.errorListeners.size === 0) {
-			this.pendingSettingErrors.push(error);
-			return;
-		}
-		this.emitError(error);
 	}
 
 	emitError(error: ExtensionError): void {
@@ -850,29 +788,6 @@ export class ExtensionRunner {
 		return false;
 	}
 
-	resolveTranscriptPresentation(block: TranscriptBlockDescriptor): TranscriptPresentation {
-		this.assertActive();
-		let current = applyTranscriptPresentationPolicies(block, []);
-		for (const extension of this.extensions) {
-			for (const registration of extension.transcriptPresentationPolicies ?? []) {
-				if (this.disabledTranscriptPresentationPolicies.has(registration)) continue;
-				try {
-					const preceding = current;
-					current = applyTranscriptPresentationPolicies(block, [() => preceding, registration.policy]);
-				} catch (error) {
-					this.disabledTranscriptPresentationPolicies.add(registration);
-					this.emitError({
-						extensionPath: extension.path,
-						event: "transcript_presentation",
-						error: error instanceof Error ? error.message : String(error),
-						stack: error instanceof Error ? error.stack : undefined,
-					});
-				}
-			}
-		}
-		return current;
-	}
-
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
 		for (const ext of this.extensions) {
 			const renderer = ext.messageRenderers.get(customType);
@@ -889,9 +804,21 @@ export class ExtensionRunner {
 
 	/** Renderers of calls to `toolName`: extension resolvers in load order, then `base`. */
 	resolveToolRenderers(toolName: string, base: () => ToolRenderers | undefined): ToolRenderers | undefined {
+		this.assertActive();
 		const resolvers = this.extensions.flatMap((ext) => ext.toolRenderers ?? []);
-		const resolve = (index: number): ToolRenderers | undefined =>
-			index < resolvers.length ? resolvers[index](toolName, () => resolve(index + 1)) : base();
+		const resolve = (index: number): ToolRenderers | undefined => {
+			if (index >= resolvers.length) return base();
+			let nextResolved = false;
+			let nextValue: ToolRenderers | undefined;
+			const next = () => {
+				if (!nextResolved) {
+					nextResolved = true;
+					nextValue = resolve(index + 1);
+				}
+				return nextValue;
+			};
+			return resolvers[index](toolName, next);
+		};
 		return resolve(0);
 	}
 

@@ -12,8 +12,12 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import type { TranscriptBlockDescriptor } from "../../../core/extensions/transcript-presentation.ts";
-import type { ToolDefinition, ToolRenderContext, ToolRenderers } from "../../../core/extensions/types.ts";
+import type {
+	ToolDefinition,
+	ToolRenderContext,
+	ToolRenderers,
+	ToolRowResult,
+} from "../../../core/extensions/types.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import type { ThemeBg } from "../theme/theme.ts";
 
@@ -38,6 +42,9 @@ export class ToolExecutionComponent extends Container {
 	private contentTextRegion: MouseRegion;
 	private selfRenderContainer: Container;
 	private selfRenderHeight = 0;
+	private fullRowContainer = new Container();
+	private useFullRow = false;
+	private rowRendererComponent?: Component;
 	private callRendererComponent?: Component;
 	private resultRendererComponent?: Component;
 	private rendererState: any = {};
@@ -83,8 +90,6 @@ export class ToolExecutionComponent extends Container {
 		this.ui = ui;
 		this.cwd = cwd;
 
-		this.addChild(new Spacer(1));
-
 		// Always create all shell variants. contentBox is used for default renderer-based composition.
 		// selfRenderContainer is used when the tool renders its own framing.
 		// contentText is reserved for generic fallback rendering when no tool definition exists.
@@ -93,12 +98,15 @@ export class ToolExecutionComponent extends Container {
 		this.contentTextRegion = this.createResultRegion(this.contentText);
 		this.selfRenderContainer = new Container();
 
-		if (this.hasRendererDefinition()) {
-			this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
-		} else {
-			this.addChild(this.contentTextRegion);
-		}
+		this.updateDisplay();
+	}
 
+	getToolName(): string {
+		return this.toolName;
+	}
+
+	setToolDefinition(toolDefinition: ToolRenderers | ToolDefinition<any, any, any> | undefined): void {
+		this.toolDefinition = toolDefinition;
 		this.updateDisplay();
 	}
 
@@ -196,16 +204,6 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	getTranscriptDescriptor(): TranscriptBlockDescriptor {
-		return {
-			id: this.toolCallId,
-			kind: "tool",
-			toolName: this.toolName,
-			state: this.isPartial ? "pending" : this.result?.isError ? "error" : "success",
-			capabilities: { summary: true, expandable: true },
-		};
-	}
-
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.updateDisplay();
@@ -254,6 +252,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		if (this.useFullRow) return super.render(width);
+
 		if (this.hideComponent) {
 			return [];
 		}
@@ -287,6 +287,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		if (this.useFullRow) return super.handleMouse(event);
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
 		return this.selfRenderContainer.handleMouse({
@@ -296,7 +297,52 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	private mountVisibleStructure(): void {
+		this.clear();
+		if (this.useFullRow) {
+			this.addChild(this.fullRowContainer);
+			return;
+		}
+
+		this.addChild(new Spacer(1));
+		if (this.hasRendererDefinition()) {
+			this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+		} else {
+			this.addChild(this.contentTextRegion);
+		}
+		for (let i = 0; i < this.imageComponents.length; i++) {
+			const spacer = this.imageSpacers[i];
+			if (spacer) this.addChild(spacer);
+			const image = this.imageComponents[i];
+			if (image) this.addChild(image);
+		}
+	}
+
 	private updateDisplay(): void {
+		this.useFullRow = false;
+		this.fullRowContainer.clear();
+		const rowRenderer = this.toolDefinition?.renderRow;
+		if (rowRenderer) {
+			try {
+				const result: ToolRowResult<unknown> | undefined = this.result
+					? {
+							content: this.result.content as ToolRowResult<unknown>["content"],
+							details: this.result.details,
+						}
+					: undefined;
+				const component = rowRenderer(this.args, result, theme, this.getRenderContext(this.rowRendererComponent));
+				this.rowRendererComponent = component;
+				if (component) {
+					this.fullRowContainer.addChild(component);
+					this.useFullRow = true;
+					this.mountVisibleStructure();
+					return;
+				}
+			} catch {
+				this.rowRendererComponent = undefined;
+			}
+		}
+
 		const bgFn = this.isPartial
 			? (text: string) => theme.bg("toolPendingBg", text)
 			: this.result?.isError
@@ -366,14 +412,8 @@ export class ToolExecutionComponent extends Container {
 
 		const previousImages = this.imageComponents;
 		const previousSources = this.imageSources;
-		for (const img of this.imageComponents) {
-			this.removeChild(img);
-		}
 		this.imageComponents = [];
 		this.imageSources = [];
-		for (const spacer of this.imageSpacers) {
-			this.removeChild(spacer);
-		}
 		this.imageSpacers = [];
 
 		if (this.result) {
@@ -382,7 +422,6 @@ export class ToolExecutionComponent extends Container {
 			for (const img of imageBlocks) {
 				if (caps.images && this.showImages && img.data && img.mimeType) {
 					const spacer = new Spacer(1);
-					this.addChild(spacer);
 					this.imageSpacers.push(spacer);
 					const source = { data: img.data, mimeType: img.mimeType, widthCells: this.imageWidthCells };
 					const index = this.imageComponents.length;
@@ -406,7 +445,6 @@ export class ToolExecutionComponent extends Container {
 					}
 					this.imageComponents.push(imageComponent);
 					this.imageSources.push(source);
-					this.addChild(imageComponent);
 				}
 			}
 		}
@@ -414,6 +452,7 @@ export class ToolExecutionComponent extends Container {
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
 			this.hideComponent = true;
 		}
+		this.mountVisibleStructure();
 	}
 
 	private getBackgroundToken(): ThemeBg {
