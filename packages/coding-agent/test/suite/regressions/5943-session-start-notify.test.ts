@@ -43,7 +43,7 @@ type RebindContext = {
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
-	bindTranscriptPresentationInvalidation: () => void;
+	bindToolRendererInvalidation: () => void;
 	subscribeToAgent: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
@@ -87,7 +87,7 @@ type ReloadCommandContext = {
 	themeController: { applyFromSettings: () => Promise<void> };
 	resetExtensionUI: () => void;
 	teardownSessionBoundary: (options?: { preservePendingBash?: boolean; resetExtensionUI?: boolean }) => void;
-	bindTranscriptPresentationInvalidation: () => void;
+	bindToolRendererInvalidation: () => void;
 	rebuildChatFromMessages: () => void;
 	setupAutocompleteProvider: () => void;
 	setupExtensionShortcuts: (runner: unknown) => void;
@@ -167,7 +167,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		teardownSessionBoundary: (options) => {
 			if (options?.resetExtensionUI !== false) resetExtensionUI();
 		},
-		bindTranscriptPresentationInvalidation: overrides.bindTranscriptPresentationInvalidation ?? (() => {}),
+		bindToolRendererInvalidation: overrides.bindToolRendererInvalidation ?? (() => {}),
 		rebuildChatFromMessages: overrides.rebuildChatFromMessages ?? (() => {}),
 		setupAutocompleteProvider: overrides.setupAutocompleteProvider ?? (() => {}),
 		setupExtensionShortcuts: overrides.setupExtensionShortcuts ?? (() => {}),
@@ -272,7 +272,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
-				bindTranscriptPresentationInvalidation: () => {},
+				bindToolRendererInvalidation: () => {},
 				subscribeToAgent: () => events.push("subscribe"),
 				updateAvailableProviderCount: async () => {},
 				updateEditorBorderColor: () => {},
@@ -314,7 +314,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
-				bindTranscriptPresentationInvalidation: () => {},
+				bindToolRendererInvalidation: () => {},
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {
@@ -367,7 +367,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
-				bindTranscriptPresentationInvalidation: () => {},
+				bindToolRendererInvalidation: () => {},
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {

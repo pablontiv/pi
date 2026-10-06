@@ -77,7 +77,7 @@ import type {
 	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
-import type { Settings, SettingsScope } from "../settings-manager.ts";
+import type { Settings } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -100,26 +100,14 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
-import type {
-	ExtensionSettingDefinition,
-	ExtensionSettingHandle,
-	RegisteredExtensionSetting,
-} from "./extension-settings.ts";
-import type { TranscriptPresentationPolicy } from "./transcript-presentation.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
-export type {
-	ExtensionSettingChoice,
-	ExtensionSettingDefinition,
-	ExtensionSettingHandle,
-	RegisteredExtensionSetting,
-} from "./extension-settings.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
-/** Settings visible to extensions. Raw extension-owned values are accessed through typed handles. */
-export type ExtensionAPISettings = Omit<Settings, "extensionSettings">;
+/** Settings visible to extensions. */
+export type ExtensionAPISettings = Settings;
 
 // ============================================================================
 // UI Context
@@ -470,6 +458,9 @@ export interface ReplacedSessionContext extends ExtensionCommandContext {
 // Tool Types
 // ============================================================================
 
+/** Result fields available to a complete interactive tool-row renderer. */
+export type ToolRowResult<TDetails = unknown> = Pick<AgentToolResult<TDetails>, "content" | "details">;
+
 /** Rendering options for tool results */
 export interface ToolRenderResultOptions {
 	/** Whether the result view is expanded */
@@ -657,11 +648,19 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		context: ToolRenderContext<TState, Static<TParams>>,
 	) => Component;
+
+	/** Optional replacement for the complete interactive TUI row. Returning undefined uses the native row. */
+	renderRow?(
+		args: Static<TParams>,
+		result: ToolRowResult<TDetails> | undefined,
+		theme: Theme,
+		context: ToolRenderContext<TState, Static<TParams>>,
+	): Component | undefined;
 }
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 
-export type ToolRenderers = Pick<AnyToolDefinition, "renderShell" | "renderCall" | "renderResult">;
+export type ToolRenderers = Pick<AnyToolDefinition, "renderShell" | "renderCall" | "renderResult" | "renderRow">;
 
 /**
  * Chooses how calls to a tool are drawn, including tools that are not registered. `next()` returns
@@ -1641,11 +1640,6 @@ export interface ExtensionAPI {
 	// Setting and Tool Registration
 	// =========================================================================
 
-	/** Register an extension-owned setting during extension initialization. */
-	registerSetting<TSchemaType extends TSchema>(
-		definition: ExtensionSettingDefinition<TSchemaType>,
-	): ExtensionSettingHandle<Static<TSchemaType>>;
-
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown, TState = any>(
 		tool: ToolDefinition<TParams, TDetails, TState>,
@@ -1699,11 +1693,8 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
 
-	/** Register a synchronous, data-only presentation policy for Pi-owned transcript blocks. */
-	registerTranscriptPresentationPolicy(policy: TranscriptPresentationPolicy): TranscriptPresentationPolicyRegistration;
-
 	/** Choose how tool calls are drawn. Resolvers run in extension load order. */
-	registerToolRenderer(resolver: ToolRendererResolver): void;
+	registerToolRenderer(resolver: ToolRendererResolver): ToolRendererRegistration;
 
 	// =========================================================================
 	// Actions
@@ -1750,7 +1741,7 @@ export interface ExtensionAPI {
 	/** Get all configured tools with parameter schema, prompt guidelines, exposure, and source metadata. */
 	getAllTools(): ToolInfo[];
 
-	/** Get a copy of the effective settings, excluding raw extension-owned values. */
+	/** Get a typed copy of the effective settings. Unknown file keys can exist at runtime but are outside this typed contract. */
 	getSettings(): ExtensionAPISettings;
 
 	/**
@@ -2126,14 +2117,8 @@ export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
-export interface TranscriptPresentationPolicyRegistration {
+export interface ToolRendererRegistration {
 	invalidate(): void;
-	dispose(): void;
-}
-
-export interface RegisteredTranscriptPresentationPolicy {
-	policy: TranscriptPresentationPolicy;
-	sourceInfo: SourceInfo;
 }
 
 /**
@@ -2142,9 +2127,6 @@ export interface RegisteredTranscriptPresentationPolicy {
  */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
-	getExtensionSetting: (extensionPath: string, key: string) => unknown;
-	setExtensionSetting: (extensionPath: string, key: string, value: unknown, scope: SettingsScope) => void;
-	onExtensionSettingChange: (extensionPath: string, key: string, listener: (value: unknown) => void) => () => void;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
 	/** Native pi-ai provider registrations queued during extension loading, processed when runner binds. */
@@ -2159,8 +2141,8 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
-	/** Notify the attached transcript that presentation policies changed. */
-	invalidateTranscriptPresentation: () => void;
+	/** Notify the attached TUI that tool renderers changed. */
+	invalidateToolRenderers: () => void;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -2272,11 +2254,9 @@ export interface Extension {
 	toolRenderers?: ToolRendererResolver[];
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;
-	transcriptPresentationPolicies?: RegisteredTranscriptPresentationPolicy[];
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
-	settings?: Map<string, RegisteredExtensionSetting>;
 }
 
 /** Result of loading extensions. */

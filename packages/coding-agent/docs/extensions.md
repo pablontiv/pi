@@ -66,28 +66,6 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 `agent_before_settle` is the final actionable boundary: it can append entries and request one continuation.
 `agent_settled` is final and notification-only; use it when an integration needs to know Pi will not continue automatically.
 
-<a id="extension-owned-settings"></a>
-
-## Extension-owned settings
-
-Extensions can register typed settings that persist in Pi's global or project settings. Registration happens while the extension factory loads and is the only time `pi.registerSetting()` may be called. Registration does not read or write stored values.
-
-A setting key is a flat, lowercase, namespaced string. It must contain at least one dot and uses lowercase alphanumeric segments separated by single dots or hyphens. Use a key such as `example.display-mode`; do not use nested objects or prototype-sensitive segments such as `__proto__`.
-
-`registerSetting()` returns an owner-only handle. The handle has `get()`, `set()`, and `onChange()`. Call these methods only from runtime handlers such as commands or session events, after the extension runtime has been bound. A handle from a previous load is stale after reload and cannot be used by the replacement runtime.
-
-The default write scope is `global`. Pass `{ scope: "project" }` to write a project value. The effective value is selected in this order: project, global, then the registered default. Project values are available and writable only after project trust has been granted. A global write does not replace a project override.
-
-A definition can include optional `ui` metadata with a `select` control and labeled choices. These choices let `/settings` display and edit the setting. A setting without this metadata remains available through its handle.
-
-Stored values must be strict JSON and must satisfy the registered TypeBox schema. Pi ignores an invalid project or global value, falls through to the next valid layer, and reports a settings diagnostic. If no stored layer is valid, the default is used. Invalid definitions or defaults fail registration instead of becoming runtime values.
-
-`onChange()` receives the new effective value. A listener runs only when a write changes that effective value, not merely when a lower-precedence layer changes. Unsubscribe listeners during `session_shutdown`; reload also invalidates the old runtime's subscriptions.
-
-`pi.getSettings()` remains a snapshot of core settings. It omits the raw `extensionSettings` map. That map is not a public extension API. Handles are capabilities: a handle grants access to the registered setting it captures, while there is no public lookup API for another extension's handle or arbitrary-key access path. Registry operations enforce the captured registration owner.
-
-The checked [`extension-setting.ts`](../examples/extensions/extension-setting.ts) example registers a literal-union setting during factory load, subscribes after `session_start`, uses global and project writes from a command, and unsubscribes during `session_shutdown`.
-
 <a id="extensionapi-methods"></a>
 
 ## Choose an integration point
@@ -105,42 +83,9 @@ The checked [`extension-setting.ts`](../examples/extensions/extension-setting.ts
 | Add an MCP server | `pi.registerMcpServer()` |
 | Route each request to a model | [`pi.registerVirtualModel()`](virtual-models.md) |
 | Add terminal rendering | Renderer registration and `ctx.ui` |
-| Change interactive transcript presentation | `pi.registerTranscriptPresentationPolicy()` |
 | Communicate with another extension | `pi.events` |
 
 Use the exported declarations in [`extensions/types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts) for exact event, context, tool, and result types.
-
-<a id="transcript-presentation-policies"></a>
-
-## Present transcript blocks
-
-`pi.registerTranscriptPresentationPolicy()` lets an extension provide a synchronous, data-only policy for Pi-owned blocks in the interactive transcript. Call it during extension factory initialization/loading; it throws when called outside that lifecycle. The policy receives a read-only `TranscriptBlockDescriptor` and the current read-only `TranscriptPresentation`, and returns a new presentation or `undefined`:
-
-```typescript
-import type {
-  ExtensionAPI,
-  TranscriptPresentationPolicy,
-} from "@earendil-works/pi-coding-agent";
-
-const policy: TranscriptPresentationPolicy = (block) => {
-  if (block.kind === "notice") return { density: "hidden" };
-  return block.capabilities.summary ? { density: "summary" } : undefined;
-};
-
-export default function (pi: ExtensionAPI) {
-  pi.registerTranscriptPresentationPolicy(policy);
-}
-```
-
-The checked [`transcript-presentation.ts`](../examples/extensions/transcript-presentation.ts) example applies this generic policy without constructing UI components or inspecting mutable messages. Descriptors expose a block kind, optional identity and subtype, optional tool metadata, state, and `summary`/`expandable` capabilities. Presentation densities are `full`, `summary`, and `hidden`.
-
-Policies execute synchronously in extension load order and then registration order. Each policy receives the preceding result; returning `undefined` preserves it. The initial density is `full`. A `summary` result for a block whose `capabilities.summary` is false falls back to `full`. If a policy throws, Pi leaves the current presentation unchanged, reports the error once for that registration, and disables that registration for the rest of the extension runtime; other registrations continue to run.
-
-Registration returns an object with `invalidate()` and `dispose()`. Call `invalidate()` when state captured by a policy changes; Pi reevaluates the policy during rendering, so live components and historical blocks update without clearing pending work or rebuilding the transcript. `invalidate()` is a no-op when no interactive transcript is attached. `dispose()` removes that registration and invalidates the transcript once. User expansion temporarily overrides policy with `full` for an expandable block; collapsing reapplies the policy.
-
-The same descriptors and policy resolution apply to historical reconstruction and live block creation. Reload discards the old runtime and its registrations, then binds the replacement runtime's policies before it emits its session-start lifecycle; extensions must register policies again after reload. Presentation changes do not alter session entries, session JSONL, model context, tool execution, or message data. Extensions still load in RPC, JSON, and print modes, but those non-interactive modes do not consume this interactive presentation policy.
-
-This API does not provide components, renderers, mutable messages, asynchronous policies, grouping, reordering, pagination, or viewport virtualization. Pi retains responsibility for transcript relationships and rendering; use message or entry renderers when an extension owns custom stored content.
 
 ## Follow the extension contracts
 
@@ -242,7 +187,11 @@ Pi records the initial prompt and tool set in the transcript's first system mess
 
 ### Tool rendering
 
-A tool's `renderCall` and `renderResult` draw its calls in the interactive transcript and in HTML exports. `pi.registerToolRenderer((toolName, next) => renderers)` chooses renderers for calls to any tool, including tools that are not registered yet, such as MCP tools in a resumed session before their server connected. `next()` returns what the remaining resolvers (in extension load order), then the registered tool, would use, so `next() ?? mine` only fills in.
+A tool's `renderCall` and `renderResult` draw its calls in the interactive transcript and in HTML exports. `pi.registerToolRenderer((toolName, next) => renderers)` chooses renderers for calls to any tool, including tools that are not registered yet, such as MCP tools in a resumed session before their server connected. Resolvers run in extension load order. A resolver delegates only when it calls `next()`. It can return the next result unchanged or extend it with its own fields.
+
+A renderer can also define `renderRow(args, result, theme, context)` for the interactive TUI. The result contains only `content` and `details`. Read the error state from `context.isError`. Return a component to replace the complete tool row, including its shell, spacing, result, and automatic images. Return `undefined` to use the native row with the effective `renderCall`, `renderResult`, and `renderShell`. A component that renders no lines hides the row. HTML export does not call `renderRow`.
+
+`registerToolRenderer()` returns a registration with `invalidate()`. Call it after captured renderer state changes. The TUI resolves the current renderer chain again for each mounted tool row. The rows retain their arguments, result, image settings, expansion state, and renderer state.
 
 ### MCP servers
 

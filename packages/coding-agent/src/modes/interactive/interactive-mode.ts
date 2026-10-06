@@ -54,7 +54,6 @@ import {
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { spawn } from "child_process";
-import { Equal } from "typebox/value";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -93,10 +92,6 @@ import type {
 	UserBashEventResult,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
-import type {
-	TranscriptBlockDescriptor,
-	TranscriptPresentation,
-} from "../../core/extensions/transcript-presentation.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -169,7 +164,7 @@ import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts
 import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
-import { type ExtensionSettingSelectorItem, SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import {
 	BranchSummaryStatusIndicator,
@@ -182,10 +177,6 @@ import {
 import { ThemedText } from "./components/themed-text.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
-import {
-	TranscriptPresentationComponent,
-	type TranscriptSummaryRenderer,
-} from "./components/transcript-presentation.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -290,11 +281,6 @@ type CompactionCostNotice = {
 	kind: "compaction" | "branch_summary";
 	usage: Usage;
 };
-
-const NOTICE_TRANSCRIPT_DESCRIPTOR: TranscriptBlockDescriptor = Object.freeze({
-	kind: "notice",
-	capabilities: Object.freeze({ summary: false, expandable: false }),
-});
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
 type PendingBashIdentity = Required<Pick<Readonly<BashExecutionMessage>, "id">>;
@@ -533,8 +519,7 @@ export class InteractiveMode {
 	private readonly assistantMessageComponents = new Set<AssistantMessageComponent>();
 	private readonly outputPaddingComponents = new Set<OutputPaddingComponent>();
 	private readonly expandableTranscriptComponents = new Set<Expandable>();
-	private readonly presentedComponents = new Map<Component, TranscriptPresentationComponent>();
-	private transcriptPresentationInvalidationUnsubscribe?: () => void;
+	private toolRendererInvalidationUnsubscribe?: () => void;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2126,7 +2111,7 @@ export class InteractiveMode {
 		if (this.session !== session) {
 			return;
 		}
-		this.bindTranscriptPresentationInvalidation();
+		this.bindToolRendererInvalidation();
 
 		if (!options.renderBeforeBind) {
 			this.subscribeToAgent();
@@ -2208,12 +2193,11 @@ export class InteractiveMode {
 	}
 
 	private teardownSessionBoundary(options: { preservePendingBash?: boolean; resetExtensionUI?: boolean } = {}): void {
-		this.transcriptPresentationInvalidationUnsubscribe?.();
-		this.transcriptPresentationInvalidationUnsubscribe = undefined;
+		this.toolRendererInvalidationUnsubscribe?.();
+		this.toolRendererInvalidationUnsubscribe = undefined;
 		if (!options.preservePendingBash) this.clearPendingBashComponents();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
-		this.presentedComponents.clear();
 		this.pendingTools.clear();
 		this.toolComponents.clear();
 		this.assistantMessageComponents.clear();
@@ -2266,95 +2250,54 @@ export class InteractiveMode {
 		this.renderInitialMessages();
 	}
 
-	private resolveTranscriptPresentation(block: Readonly<TranscriptBlockDescriptor>): TranscriptPresentation {
-		return this.session.extensionRunner.resolveTranscriptPresentation(block);
+	private bindToolRendererInvalidation(): void {
+		this.toolRendererInvalidationUnsubscribe?.();
+		this.toolRendererInvalidationUnsubscribe = this.session.extensionRunner.onToolRenderersInvalidated(() => {
+			for (const component of this.toolComponents) {
+				component.setToolDefinition(this.getRegisteredToolDefinition(component.getToolName()));
+			}
+			this.ui.requestRender();
+		});
 	}
 
-	private bindTranscriptPresentationInvalidation(): void {
-		this.transcriptPresentationInvalidationUnsubscribe?.();
-		this.transcriptPresentationInvalidationUnsubscribe =
-			this.session.extensionRunner.onTranscriptPresentationInvalidated(() => {
-				this.chatContainer.invalidate();
-				this.ui.requestRender();
-			});
-	}
-
-	private addPresentedComponent(
+	private addTrackedComponent(
 		component: Component,
-		descriptor: () => TranscriptBlockDescriptor,
 		options: {
-			renderSummary?: TranscriptSummaryRenderer;
-			isExpanded?: () => boolean;
 			tool?: ToolExecutionComponent;
 			assistant?: AssistantMessageComponent;
 			outputPadding?: OutputPaddingComponent;
 			expandable?: Expandable;
 			container?: Container;
 		} = {},
-	): TranscriptPresentationComponent {
-		const presented = new TranscriptPresentationComponent({
-			component,
-			descriptor,
-			resolve: (block) => this.resolveTranscriptPresentation(block),
-			renderSummary: options.renderSummary,
-			isExpanded: options.isExpanded ?? (options.expandable ? () => this.toolOutputExpanded : undefined),
-		});
-		(options.container ?? this.chatContainer).addChild(presented);
-		this.presentedComponents.set(component, presented);
+	): Component {
+		(options.container ?? this.chatContainer).addChild(component);
 		if (options.tool) this.toolComponents.add(options.tool);
 		if (options.assistant) this.assistantMessageComponents.add(options.assistant);
 		if (options.outputPadding) this.outputPaddingComponents.add(options.outputPadding);
 		if (options.expandable) this.expandableTranscriptComponents.add(options.expandable);
-		return presented;
+		return component;
 	}
 
-	private addTranscriptNotice(component: Component): TranscriptPresentationComponent {
+	private addTranscriptNotice(component: Component): Component {
 		const unit = new Container();
 		unit.addChild(new Spacer(1));
 		unit.addChild(component);
-		return this.addPresentedComponent(unit, () => NOTICE_TRANSCRIPT_DESCRIPTOR);
+		return this.addTrackedComponent(unit);
 	}
 
-	private addToolExecutionComponent(component: ToolExecutionComponent): TranscriptPresentationComponent {
-		const presented = this.addPresentedComponent(component, () => component.getTranscriptDescriptor(), {
-			renderSummary: (width) => component.renderSummary(width),
-			isExpanded: () => component.isExpanded(),
-			tool: component,
-			expandable: component,
-		});
-		this.invalidateAssistantPresentationRelationships();
-		return presented;
+	private addToolExecutionComponent(component: ToolExecutionComponent): Component {
+		return this.addTrackedComponent(component, { tool: component, expandable: component });
 	}
 
 	private addBashExecutionComponent(
 		component: BashExecutionComponent,
 		container: Container = this.chatContainer,
-	): TranscriptPresentationComponent {
-		return this.addPresentedComponent(
-			component,
-			() => ({ kind: "bash", capabilities: { summary: false, expandable: true } }),
-			{ expandable: component, container },
-		);
+	): Component {
+		return this.addTrackedComponent(component, { expandable: component, container });
 	}
 
-	private getRelatedToolTranscriptDescriptor(
-		toolCall: Readonly<{ id: string; name: string }>,
-	): TranscriptBlockDescriptor | undefined {
-		for (const component of this.toolComponents) {
-			const descriptor = component.getTranscriptDescriptor();
-			if (descriptor.id === toolCall.id) return descriptor;
-		}
-		return undefined;
-	}
-
-	private invalidateAssistantPresentationRelationships(): void {
-		for (const component of this.assistantMessageComponents) component.invalidate();
-	}
-
-	private removePresentedComponent(component: Component): void {
-		const presented = this.presentedComponents.get(component);
-		if (presented) this.chatContainer.removeChild(presented);
-		this.presentedComponents.delete(component);
+	private removeTrackedComponent(component: Component): void {
+		this.chatContainer.removeChild(component);
 		if (component instanceof ToolExecutionComponent) this.toolComponents.delete(component);
 		if (component instanceof AssistantMessageComponent) this.assistantMessageComponents.delete(component);
 		if (hasOutputPadding(component)) this.outputPaddingComponents.delete(component);
@@ -2362,13 +2305,11 @@ export class InteractiveMode {
 	}
 
 	private clearChatContainer(): void {
-		const clearedPresentations = new Set(this.chatContainer.children);
+		const clearedComponents = new Set(this.chatContainer.children);
 		const pendingBashComponents = new Set(this.pendingBashComponents);
 		this.chatContainer.clear();
-		for (const [component, presented] of this.presentedComponents) {
-			if (!clearedPresentations.has(presented)) continue;
+		for (const component of clearedComponents) {
 			if (component instanceof BashExecutionComponent && pendingBashComponents.has(component)) continue;
-			this.presentedComponents.delete(component);
 			if (component instanceof ToolExecutionComponent) this.toolComponents.delete(component);
 			if (component instanceof AssistantMessageComponent) this.assistantMessageComponents.delete(component);
 			if (hasOutputPadding(component)) this.outputPaddingComponents.delete(component);
@@ -2379,12 +2320,8 @@ export class InteractiveMode {
 	/** Drop deferred bash UI owned by a session before the runtime binds a replacement session. */
 	private clearPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
-			const presented = this.presentedComponents.get(component);
-			if (presented) {
-				this.pendingMessagesContainer.removeChild(presented);
-				this.chatContainer.removeChild(presented);
-			}
-			this.presentedComponents.delete(component);
+			this.pendingMessagesContainer.removeChild(component);
+			this.chatContainer.removeChild(component);
 			this.expandableTranscriptComponents.delete(component);
 			if (this.bashComponent === component) this.bashComponent = undefined;
 		}
@@ -3673,21 +3610,12 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
-						(block) => this.resolveTranscriptPresentation(block),
-						(toolCall) => this.getRelatedToolTranscriptDescriptor(toolCall),
 					);
 					this.streamingMessage = event.message;
-					this.addPresentedComponent(
-						this.streamingComponent,
-						() => ({
-							kind: "assistant-message",
-							capabilities: { summary: false, expandable: false },
-						}),
-						{
-							assistant: this.streamingComponent,
-							outputPadding: this.streamingComponent,
-						},
-					);
+					this.addTrackedComponent(this.streamingComponent, {
+						assistant: this.streamingComponent,
+						outputPadding: this.streamingComponent,
+					});
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
 				}
@@ -3753,7 +3681,6 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
-						this.invalidateAssistantPresentationRelationships();
 						this.pendingTools.clear();
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
@@ -3815,7 +3742,6 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
-					this.invalidateAssistantPresentationRelationships();
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3828,7 +3754,7 @@ export class InteractiveMode {
 				}
 				this.clearStatusIndicator("working");
 				if (this.streamingComponent) {
-					this.removePresentedComponent(this.streamingComponent);
+					this.removeTrackedComponent(this.streamingComponent);
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 				}
@@ -4026,17 +3952,12 @@ export class InteractiveMode {
 			return;
 		}
 
-		const presented = this.addPresentedComponent(
-			component,
-			() => ({ kind: "custom-entry", capabilities: { summary: false, expandable: true } }),
-			{ expandable: component },
-		);
+		const tracked = this.addTrackedComponent(component, { expandable: component });
 		if (this.streamingComponent) {
-			const streamingPresentation = this.presentedComponents.get(this.streamingComponent);
-			const streamingIndex = streamingPresentation ? this.chatContainer.children.indexOf(streamingPresentation) : -1;
+			const streamingIndex = this.chatContainer.children.indexOf(this.streamingComponent);
 			if (streamingIndex >= 0) {
-				this.chatContainer.removeChild(presented);
-				this.chatContainer.children.splice(streamingIndex, 0, presented);
+				this.chatContainer.removeChild(tracked);
+				this.chatContainer.children.splice(streamingIndex, 0, tracked);
 			}
 		}
 	}
@@ -4048,17 +3969,10 @@ export class InteractiveMode {
 		switch (message.role) {
 			case "bashExecution": {
 				const retainedComponent = options?.retainedBashComponent;
-				const retainedPresentation = retainedComponent
-					? this.presentedComponents.get(retainedComponent)
-					: undefined;
-				if (retainedComponent && !retainedPresentation) {
-					this.addBashExecutionComponent(retainedComponent);
-					break;
-				}
-				if (retainedPresentation) {
-					this.pendingMessagesContainer.removeChild(retainedPresentation);
-					if (!this.chatContainer.children.includes(retainedPresentation)) {
-						this.chatContainer.addChild(retainedPresentation);
+				if (retainedComponent) {
+					this.pendingMessagesContainer.removeChild(retainedComponent);
+					if (!this.chatContainer.children.includes(retainedComponent)) {
+						this.addBashExecutionComponent(retainedComponent);
 					}
 					break;
 				}
@@ -4086,11 +4000,7 @@ export class InteractiveMode {
 						this.outputPad,
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					this.addPresentedComponent(
-						component,
-						() => ({ kind: "custom-message", capabilities: { summary: false, expandable: true } }),
-						{ outputPadding: component, expandable: component },
-					);
+					this.addTrackedComponent(component, { outputPadding: component, expandable: component });
 				}
 				break;
 			}
@@ -4098,22 +4008,14 @@ export class InteractiveMode {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.addPresentedComponent(
-					component,
-					() => ({ kind: "summary", capabilities: { summary: false, expandable: true } }),
-					{ expandable: component },
-				);
+				this.addTrackedComponent(component, { expandable: component });
 				break;
 			}
 			case "branchSummary": {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.addPresentedComponent(
-					component,
-					() => ({ kind: "summary", capabilities: { summary: false, expandable: true } }),
-					{ expandable: component },
-				);
+				this.addTrackedComponent(component, { expandable: component });
 				break;
 			}
 			case "system":
@@ -4132,11 +4034,7 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.addPresentedComponent(
-							component,
-							() => ({ kind: "user-message", capabilities: { summary: false, expandable: true } }),
-							{ expandable: component },
-						);
+						this.addTrackedComponent(component, { expandable: component });
 						// Render user message separately if present
 						if (skillBlock.userMessage) {
 							this.chatContainer.addChild(new Spacer(1));
@@ -4146,14 +4044,7 @@ export class InteractiveMode {
 								this.outputPad,
 								this.getMarkdownTransformers(),
 							);
-							this.addPresentedComponent(
-								userComponent,
-								() => ({
-									kind: "user-message",
-									capabilities: { summary: false, expandable: false },
-								}),
-								{ outputPadding: userComponent },
-							);
+							this.addTrackedComponent(userComponent, { outputPadding: userComponent });
 						}
 					} else {
 						const userComponent = new UserMessageComponent(
@@ -4162,14 +4053,7 @@ export class InteractiveMode {
 							this.outputPad,
 							this.getMarkdownTransformers(),
 						);
-						this.addPresentedComponent(
-							userComponent,
-							() => ({
-								kind: "user-message",
-								capabilities: { summary: false, expandable: false },
-							}),
-							{ outputPadding: userComponent },
-						);
+						this.addTrackedComponent(userComponent, { outputPadding: userComponent });
 					}
 					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
@@ -4185,17 +4069,11 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
-					(block) => this.resolveTranscriptPresentation(block),
-					(toolCall) => this.getRelatedToolTranscriptDescriptor(toolCall),
 				);
-				this.addPresentedComponent(
-					assistantComponent,
-					() => ({
-						kind: "assistant-message",
-						capabilities: { summary: false, expandable: false },
-					}),
-					{ assistant: assistantComponent, outputPadding: assistantComponent },
-				);
+				this.addTrackedComponent(assistantComponent, {
+					assistant: assistantComponent,
+					outputPadding: assistantComponent,
+				});
 				break;
 			}
 			case "toolResult": {
@@ -4297,7 +4175,6 @@ export class InteractiveMode {
 								errorMessage = message.errorMessage || "Error";
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-							this.invalidateAssistantPresentationRelationships();
 						} else {
 							renderedPendingTools.set(content.id, component);
 						}
@@ -4312,7 +4189,6 @@ export class InteractiveMode {
 				const component = renderedPendingTools.get(message.toolCallId);
 				if (component) {
 					component.updateResult(message);
-					this.invalidateAssistantPresentationRelationships();
 					renderedPendingTools.delete(message.toolCallId);
 				}
 			} else {
@@ -4820,9 +4696,7 @@ export class InteractiveMode {
 			if (isExpandable(child)) child.setExpanded(expanded);
 		}
 		for (const child of this.chatContainer.children) {
-			if (!(child instanceof TranscriptPresentationComponent) && isExpandable(child)) {
-				child.setExpanded(expanded);
-			}
+			if (isExpandable(child)) child.setExpanded(expanded);
 		}
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
 	}
@@ -5109,12 +4983,10 @@ export class InteractiveMode {
 	/** Move pending bash components from pending area to chat */
 	private flushPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
-			const presented = this.presentedComponents.get(component);
 			this.pendingBashMessages.delete(component);
-			if (!presented) continue;
-			this.pendingMessagesContainer.removeChild(presented);
-			if (!this.chatContainer.children.includes(presented)) {
-				this.chatContainer.addChild(presented);
+			this.pendingMessagesContainer.removeChild(component);
+			if (!this.chatContainer.children.includes(component)) {
+				this.chatContainer.addChild(component);
 			}
 		}
 		this.pendingBashComponents = [];
@@ -5163,35 +5035,6 @@ export class InteractiveMode {
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
 			let selector: SettingsSelectorComponent | undefined;
-			const extensionRunner = this.session.extensionRunner;
-			const registeredExtensionSettings = extensionRunner.getRegisteredSettings();
-			const currentExtensionSettingLabel = (setting: (typeof registeredExtensionSettings)[number]): string => {
-				const { definition } = setting;
-				const effectiveValue = extensionRunner.getExtensionSettingValue(definition.key);
-				return definition.ui?.choices.find((choice) => Equal(choice.value, effectiveValue))?.label ?? "(custom)";
-			};
-			const extensionSettingRegistrations = new Map(
-				registeredExtensionSettings.map((setting) => [setting.definition.key, setting]),
-			);
-			const extensionSettingLabels = new Map<string, string>();
-			const extensionSettings: ExtensionSettingSelectorItem[] = registeredExtensionSettings.flatMap((setting) => {
-				const { definition } = setting;
-				if (!definition.ui) return [];
-				const currentValueLabel = currentExtensionSettingLabel(setting);
-				extensionSettingLabels.set(definition.key, currentValueLabel);
-				return [
-					{
-						key: definition.key,
-						title: definition.title,
-						description: definition.description,
-						currentValueLabel,
-						choices: definition.ui.choices.map((choice) => ({
-							label: choice.label,
-							value: structuredClone(choice.value),
-						})),
-					},
-				];
-			});
 			const defaultProvider = this.settingsManager.getDefaultProvider();
 			const defaultModelId = this.settingsManager.getDefaultModel();
 			const defaultModel = defaultProvider && defaultModelId ? `${defaultProvider}/${defaultModelId}` : "not set";
@@ -5238,7 +5081,6 @@ export class InteractiveMode {
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 					fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
 					warnings: this.settingsManager.getWarnings(),
-					extensionSettings,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5414,22 +5256,6 @@ export class InteractiveMode {
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
-					},
-					onExtensionSettingChange: (key, value) => {
-						const itemId = `extension-setting:${key}`;
-						const previousLabel = extensionSettingLabels.get(key) ?? "(custom)";
-						try {
-							extensionRunner.setExtensionSettingValue(key, value);
-							const setting = extensionSettingRegistrations.get(key);
-							if (setting) {
-								const currentLabel = currentExtensionSettingLabel(setting);
-								extensionSettingLabels.set(key, currentLabel);
-								selector?.getSettingsList().updateValue(itemId, currentLabel);
-							}
-						} catch (error) {
-							selector?.getSettingsList().updateValue(itemId, previousLabel);
-							this.showError(error instanceof Error ? error.message : String(error));
-						}
 					},
 					onCancel: () => {
 						done();
@@ -6768,7 +6594,7 @@ export class InteractiveMode {
 			}
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			this.outputPad = this.settingsManager.getOutputPad();
-			this.bindTranscriptPresentationInvalidation();
+			this.bindToolRendererInvalidation();
 			this.rebuildChatFromMessages();
 			chatRestoredBeforeSessionStart = true;
 		};
@@ -7414,8 +7240,8 @@ export class InteractiveMode {
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
-		this.transcriptPresentationInvalidationUnsubscribe?.();
-		this.transcriptPresentationInvalidationUnsubscribe = undefined;
+		this.toolRendererInvalidationUnsubscribe?.();
+		this.toolRendererInvalidationUnsubscribe = undefined;
 		if (this.isInitialized) {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;

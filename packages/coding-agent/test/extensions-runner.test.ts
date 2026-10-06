@@ -16,7 +16,6 @@ import {
 	loadExtensions,
 } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
-import type { TranscriptBlockDescriptor } from "../src/core/extensions/transcript-presentation.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
@@ -111,27 +110,6 @@ describe("ExtensionRunner", () => {
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],
 	};
-
-	describe("settings access", () => {
-		it("redacts extensionSettings without mutating the core snapshot", async () => {
-			let getSettings: (() => unknown) | undefined;
-			const runtime = createExtensionRuntime();
-			const extension = await loadExtensionFromFactory(
-				(pi) => {
-					getSettings = () => pi.getSettings();
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
-			const snapshot = { theme: "dark", extensionSettings: { "acme.mode": "compact" } };
-			runner.bindCore({ ...extensionActions, getSettings: () => snapshot }, extensionContextActions);
-
-			expect(getSettings?.()).toEqual({ theme: "dark" });
-			expect(snapshot).toEqual({ theme: "dark", extensionSettings: { "acme.mode": "compact" } });
-		});
-	});
 
 	describe("scopedModels", () => {
 		it("reflects the getScopedModels context action on ctx.scopedModels", async () => {
@@ -621,118 +599,6 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("transcript presentation policies", () => {
-		const block: TranscriptBlockDescriptor = {
-			id: "tool-1",
-			kind: "tool",
-			toolName: "read",
-			state: "success",
-			capabilities: { summary: true, expandable: true },
-		};
-
-		it("invalidates without evaluating and disposes only its own registration once", async () => {
-			const runtime = createExtensionRuntime();
-			const firstPolicy = vi.fn(() => ({ density: "summary" as const }));
-			const secondPolicy = vi.fn(() => ({ density: "hidden" as const }));
-			let firstRegistration: { invalidate(): void; dispose(): void } | undefined;
-			const extension = await loadExtensionFromFactory(
-				(pi) => {
-					firstRegistration = pi.registerTranscriptPresentationPolicy(firstPolicy);
-					pi.registerTranscriptPresentationPolicy(secondPolicy);
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-				"<inline:transcript-registration>",
-			);
-			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
-			const invalidated = vi.fn();
-			runner.onTranscriptPresentationInvalidated(invalidated);
-
-			firstRegistration?.invalidate();
-			expect(invalidated).toHaveBeenCalledTimes(1);
-			expect(firstPolicy).not.toHaveBeenCalled();
-			expect(secondPolicy).not.toHaveBeenCalled();
-
-			firstRegistration?.dispose();
-			firstRegistration?.dispose();
-			expect(invalidated).toHaveBeenCalledTimes(2);
-			expect(extension.transcriptPresentationPolicies?.map((registration) => registration.policy)).toEqual([
-				secondPolicy,
-			]);
-			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "hidden" });
-			expect(firstPolicy).not.toHaveBeenCalled();
-			expect(secondPolicy).toHaveBeenCalledTimes(1);
-
-			runner.invalidate();
-			runtime.invalidateTranscriptPresentation();
-			expect(invalidated).toHaveBeenCalledTimes(2);
-		});
-
-		it("restricts policy registration to extension loading", async () => {
-			const runtime = createExtensionRuntime();
-			let registerLate: (() => void) | undefined;
-			await loadExtensionFromFactory(
-				(pi) => {
-					registerLate = () => {
-						pi.registerTranscriptPresentationPolicy(() => ({ density: "hidden" }));
-					};
-				},
-				tempDir,
-				createEventBus(),
-				runtime,
-			);
-
-			expect(registerLate).toBeDefined();
-			expect(() => registerLate?.()).toThrow("only be registered during extension loading");
-		});
-
-		it("isolates a failing registration once and continues composition", async () => {
-			const runtime = createExtensionRuntime();
-			const eventBus = createEventBus();
-			const throwingPolicy = vi.fn(() => {
-				throw new Error("presentation failed");
-			});
-			const finalPolicy = vi.fn((_block: TranscriptBlockDescriptor, current: { readonly density: string }) => ({
-				density: current.density === "hidden" ? ("summary" as const) : ("full" as const),
-			}));
-			const first = await loadExtensionFromFactory(
-				(pi) => {
-					pi.registerTranscriptPresentationPolicy(() => ({ density: "hidden" }));
-					pi.registerTranscriptPresentationPolicy(throwingPolicy);
-				},
-				tempDir,
-				eventBus,
-				runtime,
-				"<inline:throwing-policy>",
-			);
-			const second = await loadExtensionFromFactory(
-				(pi) => {
-					pi.registerTranscriptPresentationPolicy(finalPolicy);
-				},
-				tempDir,
-				eventBus,
-				runtime,
-				"<inline:valid-policy>",
-			);
-			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
-			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
-			runner.onError((error) => errors.push(error));
-
-			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "summary" });
-			expect(runner.resolveTranscriptPresentation(block)).toEqual({ density: "summary" });
-			expect(throwingPolicy).toHaveBeenCalledTimes(1);
-			expect(finalPolicy).toHaveBeenCalledTimes(2);
-			expect(errors).toMatchObject([
-				{
-					extensionPath: "<inline:throwing-policy>",
-					event: "transcript_presentation",
-					error: "presentation failed",
-				},
-			]);
-		});
-	});
-
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
@@ -1028,13 +894,17 @@ describe("ExtensionRunner", () => {
 		const eventBus = createEventBus();
 		const renderCall = () => ({ render: () => [], invalidate: () => {} });
 		const first = await loadExtensionFromFactory(
-			(pi) => pi.registerToolRenderer((toolName, next) => (toolName === "a" ? { renderCall } : next())),
+			(pi) => {
+				pi.registerToolRenderer((toolName, next) => (toolName === "a" ? { renderCall } : next()));
+			},
 			tempDir,
 			eventBus,
 			runtime,
 		);
 		const second = await loadExtensionFromFactory(
-			(pi) => pi.registerToolRenderer((_toolName, next) => next() ?? { renderShell: "self" }),
+			(pi) => {
+				pi.registerToolRenderer((_toolName, next) => next() ?? { renderShell: "self" });
+			},
 			tempDir,
 			eventBus,
 			runtime,
@@ -1044,6 +914,69 @@ describe("ExtensionRunner", () => {
 		expect(runner.resolveToolRenderers("a", () => undefined)).toEqual({ renderCall });
 		expect(runner.resolveToolRenderers("b", () => undefined)).toEqual({ renderShell: "self" });
 		expect(runner.resolveToolRenderers("b", () => ({ renderCall }))).toEqual({ renderCall });
+	});
+
+	it("runs later tool renderer resolvers only after explicit delegation", async () => {
+		const runtime = createExtensionRuntime();
+		const eventBus = createEventBus();
+		const renderCall = () => ({ render: () => [], invalidate: () => {} });
+		const renderRow = () => undefined;
+		const downstream = vi.fn(() => ({ renderShell: "self" as const, renderRow }));
+		let delegate = false;
+		const first = await loadExtensionFromFactory(
+			(pi) => {
+				pi.registerToolRenderer((_toolName, next) => {
+					if (!delegate) return { renderCall };
+					return { ...next(), renderCall };
+				});
+			},
+			tempDir,
+			eventBus,
+			runtime,
+		);
+		const second = await loadExtensionFromFactory(
+			(pi) => {
+				pi.registerToolRenderer(downstream);
+			},
+			tempDir,
+			eventBus,
+			runtime,
+		);
+		const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+
+		expect(runner.resolveToolRenderers("a", () => undefined)).toEqual({ renderCall });
+		expect(downstream).not.toHaveBeenCalled();
+
+		delegate = true;
+		expect(runner.resolveToolRenderers("a", () => undefined)).toEqual({
+			renderShell: "self",
+			renderRow,
+			renderCall,
+		});
+		expect(downstream).toHaveBeenCalledOnce();
+	});
+
+	it("returns an invalidation-only registration and rejects it after runtime invalidation", async () => {
+		const runtime = createExtensionRuntime();
+		let registration: { invalidate(): void } | undefined;
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				registration = pi.registerToolRenderer(() => undefined);
+			},
+			tempDir,
+			createEventBus(),
+			runtime,
+		);
+		const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+		const invalidated = vi.fn();
+		runner.onToolRenderersInvalidated(invalidated);
+
+		expect(Object.keys(registration ?? {})).toEqual(["invalidate"]);
+		registration?.invalidate();
+		expect(invalidated).toHaveBeenCalledOnce();
+		runner.invalidate("stale runtime");
+		expect(() => registration?.invalidate()).toThrow("stale runtime");
+		expect(invalidated).toHaveBeenCalledOnce();
 	});
 
 	describe("boundary chaining", () => {

@@ -1,4 +1,3 @@
-import { copyJson, type JsonValue } from "@earendil-works/chord";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_MAX_AGENT_RETRY_DELAY_MS, type Model, type Transport } from "@earendil-works/pi-ai";
 import type {
@@ -188,7 +187,6 @@ export interface Settings {
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
 	fullscreenWheelScrollLines?: WheelScrollLines; // default: "auto"; lines per wheel event, 1-100
-	extensionSettings?: Record<string, JsonValue>;
 }
 
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
@@ -252,9 +250,6 @@ function resolveDefaultTools(entries: string[]): string[] {
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively. */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	const merged = deepMergeObjects(base as Record<string, unknown>, overrides as Record<string, unknown>) as Settings;
-	if (isMergeableObject(base.extensionSettings) && isMergeableObject(overrides.extensionSettings)) {
-		merged.extensionSettings = { ...base.extensionSettings, ...overrides.extensionSettings };
-	}
 	const defaultTools = mergeDefaultTools(base.defaultTools, overrides.defaultTools);
 	return defaultTools === undefined ? merged : { ...merged, defaultTools };
 }
@@ -579,38 +574,6 @@ export class SettingsManager {
 
 	getProjectSettings(): Settings {
 		return structuredClone(this.projectSettings);
-	}
-
-	getExtensionSettingLayers(key: string): { global: unknown; project: unknown } {
-		const global = this.globalSettings.extensionSettings?.[key];
-		const project = this.projectSettings.extensionSettings?.[key];
-		return {
-			global: global === undefined ? undefined : copyJson(global),
-			project: project === undefined ? undefined : copyJson(project),
-		};
-	}
-
-	setExtensionSetting(key: string, value: unknown, scope: SettingsScope = "global"): void {
-		if (scope === "project") {
-			this.assertProjectTrustedForWrite();
-			const copiedValue = copyJson(value);
-			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.extensionSettings = {
-				...(projectSettings.extensionSettings ?? {}),
-				[key]: copiedValue,
-			};
-			this.markProjectModified("extensionSettings", key);
-			this.saveProjectSettings(projectSettings);
-			return;
-		}
-
-		const copiedValue = copyJson(value);
-		this.globalSettings.extensionSettings = {
-			...(this.globalSettings.extensionSettings ?? {}),
-			[key]: copiedValue,
-		};
-		this.markModified("extensionSettings", key);
-		this.save();
 	}
 
 	isProjectTrusted(): boolean {
