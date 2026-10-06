@@ -1,6 +1,6 @@
 import type { Component } from "@earendil-works/pi-tui";
 import { readFileSync } from "fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.ts";
 import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
@@ -19,6 +19,20 @@ describe("export HTML tool output whitespace", () => {
 
 	it("does not insert source whitespace between ANSI-rendered lines", () => {
 		expect(ansiLinesToHtml(["one", "two"])).toBe('<div class="ansi-line">one</div><div class="ansi-line">two</div>');
+	});
+
+	it("does not execute the interactive renderRow hook", () => {
+		const renderRow = vi.fn(() => ({ render: () => ["row"], invalidate: () => {} }));
+		const renderCall = vi.fn(() => ({ render: () => ["call"], invalidate: () => {} }));
+		const renderer = createToolHtmlRenderer({
+			getToolRenderers: () => ({ renderRow, renderCall }),
+			theme: {} as Theme,
+			cwd: "/tmp",
+		});
+
+		renderer.renderCall("id", "custom", {});
+		expect(renderCall).toHaveBeenCalledOnce();
+		expect(renderRow).not.toHaveBeenCalled();
 	});
 
 	it("trims TUI spacing lines from custom tool result HTML", () => {

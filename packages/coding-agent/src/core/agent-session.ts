@@ -3627,10 +3627,6 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
-			{
-				getExtensionSettingLayers: (key) => this.settingsManager.getExtensionSettingLayers(key),
-				setExtensionSetting: (key, value, scope) => this.settingsManager.setExtensionSetting(key, value, scope),
-			},
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;

@@ -56,17 +56,6 @@ const DEFAULT_PROJECT_TRUST_BY_LABEL = new Map(
 	Object.entries(DEFAULT_PROJECT_TRUST_LABELS).map(([value, label]) => [label, value as DefaultProjectTrust]),
 );
 
-export interface ExtensionSettingSelectorItem {
-	key: string;
-	title: string;
-	description: string;
-	currentValueLabel: string;
-	choices: readonly {
-		label: string;
-		value: unknown;
-	}[];
-}
-
 export interface SettingsConfig {
 	autoCompact: boolean;
 	defaultModel: string;
@@ -109,7 +98,6 @@ export interface SettingsConfig {
 	fullscreenCopyOnSelect: boolean;
 	fullscreenWheelScrollLines: WheelScrollLines;
 	warnings: WarningSettings;
-	extensionSettings?: readonly ExtensionSettingSelectorItem[];
 }
 
 export interface SettingsCallbacks {
@@ -149,7 +137,6 @@ export interface SettingsCallbacks {
 	onFullscreenCopyOnSelectChange: (enabled: boolean) => void;
 	onFullscreenWheelScrollLinesChange: (lines: WheelScrollLines) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
-	onExtensionSettingChange?: (key: string, value: unknown) => void;
 	onCancel: () => void;
 }
 
@@ -875,21 +862,6 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		const extensionSettingsById = new Map<string, ExtensionSettingSelectorItem>();
-		if (callbacks.onExtensionSettingChange) {
-			for (const setting of config.extensionSettings ?? []) {
-				const id = `extension-setting:${setting.key}`;
-				extensionSettingsById.set(id, setting);
-				items.push({
-					id,
-					label: setting.title,
-					description: setting.description,
-					currentValue: setting.currentValueLabel,
-					values: setting.choices.map((choice) => choice.label),
-				});
-			}
-		}
-
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -898,13 +870,6 @@ export class SettingsSelectorComponent extends Container {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => {
-				const extensionSetting = extensionSettingsById.get(id);
-				if (extensionSetting) {
-					const choice = extensionSetting.choices.find((candidate) => candidate.label === newValue);
-					if (choice) callbacks.onExtensionSettingChange?.(extensionSetting.key, structuredClone(choice.value));
-					return;
-				}
-
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");

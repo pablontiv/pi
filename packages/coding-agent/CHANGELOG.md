@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the extension APIs `registerSetting()` and `registerTranscriptPresentationPolicy()`. Extensions must use `registerToolRenderer().renderRow` to control interactive tool-row presentation.
+
+### Fixed
+
+- Downstream Pion builds no longer check or offer updates from the Pi upstream release channel.
+
 ## [1.0.4] - 2026-10-05
 
 ### New Features

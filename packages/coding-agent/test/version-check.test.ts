@@ -6,6 +6,7 @@ import {
 	getLatestPiRelease,
 	getLatestPiVersion,
 	isNewerPackageVersion,
+	isPionDownstreamVersion,
 } from "../src/utils/version-check.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
@@ -40,6 +41,27 @@ describe("version checks", () => {
 
 		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
 		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
+	});
+
+	it("does not check the Pi upstream channel for downstream Pion versions", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ version: "1.0.4" }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(checkForNewPiVersion("1.0.4-pion.1")).resolves.toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("recognizes only valid downstream Pion versions", async () => {
+		expect(isPionDownstreamVersion("1.0.4-pion.1")).toBe(true);
+		expect(isPionDownstreamVersion("1.0.4-pion.42")).toBe(true);
+
+		const invalidVersions = ["1.0.4", "1.0.4-pion.0", "1.0.4-pion.01", "1.0.4-pion.1+build", "1.0.4-rc.1"];
+		for (const version of invalidVersions) expect(isPionDownstreamVersion(version)).toBe(false);
+
+		const fetchMock = vi.fn(async () => Response.json({ version: "1.0.4" }));
+		vi.stubGlobal("fetch", fetchMock);
+		for (const version of invalidVersions) await checkForNewPiVersion(version);
+		expect(fetchMock).toHaveBeenCalledTimes(invalidVersions.length);
 	});
 
 	it("uses the pi.dev version check api with a pi user agent", async () => {
