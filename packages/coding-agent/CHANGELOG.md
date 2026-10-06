@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Downstream Pion release tarballs no longer declare source-only exports that are absent from the package.
 - Downstream Pion builds no longer check or offer updates from the Pi upstream release channel.
 
 ## [1.0.4] - 2026-10-05

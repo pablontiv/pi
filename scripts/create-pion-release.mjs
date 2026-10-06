@@ -51,6 +51,13 @@ export function createPionManifest(manifest, pionVersion, upstreamVersion = deri
 	if (manifest.version !== upstreamVersion) {
 		throw new Error(`Upstream version ${upstreamVersion} must match the source package version ${manifest.version}`);
 	}
+	const exports = Object.fromEntries(
+		Object.entries(manifest.exports ?? {}).flatMap(([subpath, target]) => {
+			if (!target || typeof target !== "object" || Array.isArray(target)) return [[subpath, target]];
+			const { source: _source, ...publishedTargets } = target;
+			return Object.keys(publishedTargets).length > 0 ? [[subpath, publishedTargets]] : [];
+		}),
+	);
 	return {
 		...manifest,
 		name: "@pablontiv/pion",
@@ -58,12 +65,28 @@ export function createPionManifest(manifest, pionVersion, upstreamVersion = deri
 		private: true,
 		description: "Pion coding agent, a personal downstream distribution of Pi",
 		bin: { pion: "dist/bundle/cli.js" },
+		exports,
 		repository: {
 			type: "git",
 			url: "git+https://github.com/pablontiv/pi.git",
 			directory: "packages/coding-agent",
 		},
 	};
+}
+
+export function validatePackageExports(packageDirectory) {
+	const manifest = readJson(join(packageDirectory, "package.json"), "packaged package.json");
+	const missing = [];
+	function visit(value, keyPath) {
+		if (typeof value === "string") {
+			if (!existsSync(join(packageDirectory, value))) missing.push(`${keyPath} -> ${value}`);
+		} else if (value && typeof value === "object") {
+			for (const [key, child] of Object.entries(value)) visit(child, `${keyPath}.${key}`);
+		}
+	}
+	visit(manifest.exports, "exports");
+	if (missing.length > 0) throw new Error(`Package exports reference missing files: ${missing.join(", ")}`);
+	return manifest.exports;
 }
 
 function run(command, args, options = {}) {
@@ -311,6 +334,10 @@ export function createPionRelease({ out, pionVersion, upstreamVersion, upstreamT
 		writeFileSync(join(stagedPackage, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 		const artifact = pack(stagedPackage, out);
 		if (resolve(artifact) !== expectedArtifact) throw new Error(`Unexpected artifact filename: ${basename(artifact)}`);
+		const packagedRoot = join(temporaryDirectory, "packaged");
+		mkdirSync(packagedRoot);
+		run("tar", ["-xzf", artifact, "-C", packagedRoot]);
+		validatePackageExports(join(packagedRoot, "package"));
 
 		const headCommit = run("git", ["rev-parse", "HEAD"], { cwd: ROOT }).trim();
 		if (sourceCommit && sourceCommit !== headCommit) {

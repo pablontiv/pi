@@ -10,6 +10,7 @@ import {
 	deriveUpstreamVersion,
 	EXPECTED_PUBLIC_PACKAGES,
 	renderReleaseNotes,
+	validatePackageExports,
 	validatePionVersion,
 	validateReleaseAssets,
 	validateReleaseSnapshot,
@@ -56,6 +57,12 @@ test("creates a registry-free Pion manifest with separate Pion and upstream vers
 		name: "@earendil-works/pi-coding-agent",
 		version: "1.0.4",
 		bin: { pi: "dist/bundle/cli.js" },
+		exports: {
+			".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+			"./client": { source: "./src/client/index.ts" },
+			"./experimental/plugin": { source: "./src/experimental/plugin.ts" },
+			"./rpc-entry": { import: "./dist/bundle/rpc-entry.js" },
+		},
 		repository: { type: "git", url: "git+https://github.com/earendil-works/pi.git" },
 		dependencies: { "@earendil-works/pi-ai": "^1.0.4" },
 	};
@@ -64,10 +71,39 @@ test("creates a registry-free Pion manifest with separate Pion and upstream vers
 	assert.equal(result.version, "1.0.4-pion.1");
 	assert.equal(result.private, true);
 	assert.deepEqual(result.bin, { pion: "dist/bundle/cli.js" });
+	assert.deepEqual(result.exports, {
+		".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+		"./rpc-entry": { import: "./dist/bundle/rpc-entry.js" },
+	});
 	assert.equal(result.repository.url, "git+https://github.com/pablontiv/pi.git");
 	assert.equal(result.dependencies["@earendil-works/pi-ai"], "^1.0.4");
 	assert.equal(createPionManifest(source, "1.0.4").version, "1.0.4");
 	assert.equal(source.name, "@earendil-works/pi-coding-agent");
+	assert.ok("./client" in source.exports);
+});
+
+test("rejects every packaged export target that points to a missing file", () => {
+	const root = mkdtempSync(join(tmpdir(), "pion-package-test-"));
+	try {
+		mkdirSync(join(root, "dist"));
+		writeFileSync(join(root, "dist/index.js"), "export {};\n");
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				exports: {
+					".": { import: "./dist/index.js" },
+					"./client": { source: "./src/client/index.ts" },
+					"./experimental/plugin": { source: "./src/experimental/plugin.ts" },
+				},
+			}),
+		);
+		assert.throws(
+			() => validatePackageExports(root),
+			/\.\/src\/client\/index\.ts.*\.\/src\/experimental\/plugin\.ts/iu,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("accepts canonical and numbered Pion versions only", () => {
