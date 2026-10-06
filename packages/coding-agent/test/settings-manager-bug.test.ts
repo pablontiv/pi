@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import lockfile from "proper-lockfile";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FileSettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 
 /**
  * Tests for the fix to a bug where external file changes to arrays were overwritten.
@@ -32,6 +33,45 @@ describe("SettingsManager - External Edit Preservation", () => {
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true });
 		}
+	});
+
+	it("locks before reading when two file-backed writers start with an absent file", () => {
+		const settingsPath = join(agentDir, "settings.json");
+		const first = new FileSettingsStorage(projectDir, agentDir);
+		const second = new FileSettingsStorage(projectDir, agentDir);
+		const originalLockSync = lockfile.lockSync.bind(lockfile);
+		let startSecondWriter = true;
+		let firstCallbackCalls = 0;
+		const writeSetting = (current: string | undefined, key: string, value: number): string => {
+			const settings = current ? JSON.parse(current) : {};
+			return JSON.stringify({
+				...settings,
+				extensionSettings: { ...settings.extensionSettings, [key]: value },
+			});
+		};
+		const lockSpy = vi.spyOn(lockfile, "lockSync").mockImplementation((path, options) => {
+			if (startSecondWriter) {
+				startSecondWriter = false;
+				second.withLock("global", (current) => writeSetting(current, "second.value", 2));
+			}
+			return originalLockSync(path, options);
+		});
+
+		try {
+			expect(existsSync(settingsPath)).toBe(false);
+			first.withLock("global", (current) => {
+				firstCallbackCalls++;
+				return writeSetting(current, "first.value", 1);
+			});
+		} finally {
+			lockSpy.mockRestore();
+		}
+
+		expect(firstCallbackCalls).toBe(1);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).extensionSettings).toEqual({
+			"second.value": 2,
+			"first.value": 1,
+		});
 	});
 
 	it("should preserve file changes to packages array when changing unrelated setting", async () => {

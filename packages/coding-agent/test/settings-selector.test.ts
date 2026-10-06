@@ -2,6 +2,7 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import {
+	type ExtensionSettingSelectorItem,
 	type SettingsCallbacks,
 	type SettingsConfig,
 	SettingsSelectorComponent,
@@ -61,6 +62,119 @@ describe("SettingsSelectorComponent", () => {
 		// #9758: custom values from settings.json stay in the cycle.
 		cycle("Fullscreen wheel scrolling", 3);
 		expect(onWheelScrollLinesChange.mock.calls.flat()).toEqual([10, "auto", 1]);
+	});
+
+	it("appends extension settings and maps choice labels back to typed values", () => {
+		const extensionSettings: ExtensionSettingSelectorItem[] = [
+			{
+				key: "first.mode",
+				title: "First mode",
+				description: "First extension setting",
+				currentValueLabel: "Careful",
+				choices: [
+					{ label: "Quick", value: { mode: "quick" } },
+					{ label: "Careful", value: { mode: "careful" } },
+				],
+			},
+			{
+				key: "second.enabled",
+				title: "Second enabled",
+				description: "Second extension setting",
+				currentValueLabel: "Enabled",
+				choices: [
+					{ label: "Disabled", value: false },
+					{ label: "Enabled", value: true },
+				],
+			},
+		];
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+			extensionSettings,
+		} as unknown as SettingsConfig;
+		const onExtensionSettingChange = vi.fn();
+		const callbacks = {
+			onExtensionSettingChange,
+			onCancel: () => {},
+		} as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		const items = Reflect.get(list, "items") as Array<{ id: string; currentValue: string }>;
+
+		expect(items.slice(-2).map((item) => item.id)).toEqual([
+			"extension-setting:first.mode",
+			"extension-setting:second.enabled",
+		]);
+		expect(items.slice(-2).map((item) => item.currentValue)).toEqual(["Careful", "Enabled"]);
+
+		list.selectItem("extension-setting:first.mode");
+		list.handleInput("\r");
+		expect(onExtensionSettingChange).toHaveBeenCalledWith("first.mode", { mode: "quick" });
+		expect(onExtensionSettingChange.mock.calls[0]?.[1]).not.toBe(extensionSettings[0]?.choices[0]?.value);
+	});
+
+	it("does not append extension settings without a persistence callback", () => {
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+			extensionSettings: [
+				{
+					key: "acme.mode",
+					title: "Acme mode",
+					description: "Mode",
+					currentValueLabel: "First",
+					choices: [{ label: "First", value: 1 }],
+				},
+			],
+		} as unknown as SettingsConfig;
+		const callbacks = { onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		const items = Reflect.get(list, "items") as Array<{ id: string }>;
+
+		expect(items.some((item) => item.id === "extension-setting:acme.mode")).toBe(false);
+	});
+
+	it("cycles a custom extension value to the first typed choice", () => {
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+			extensionSettings: [
+				{
+					key: "acme.mode",
+					title: "Acme mode",
+					description: "Mode",
+					currentValueLabel: "(custom)",
+					choices: [
+						{ label: "First", value: 1 },
+						{ label: "Second", value: 2 },
+					],
+				},
+			],
+		} as unknown as SettingsConfig;
+		const onExtensionSettingChange = vi.fn();
+		const callbacks = {
+			onExtensionSettingChange,
+			onCancel: () => {},
+		} as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("extension-setting:acme.mode");
+		list.handleInput("\r");
+
+		expect(onExtensionSettingChange).toHaveBeenCalledWith("acme.mode", 1);
+		const items = Reflect.get(list, "items") as Array<{ id: string; currentValue: string }>;
+		expect(items.find((item) => item.id === "extension-setting:acme.mode")?.currentValue).toBe("First");
 	});
 
 	it("keeps the configured fixed theme marked while browsing", () => {

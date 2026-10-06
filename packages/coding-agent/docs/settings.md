@@ -2,6 +2,16 @@
 
 This reference lists user-configurable settings, their types, defaults, and purposes. Project settings override agent-directory settings. Resource lists are combined. See [Configuration](configuration.md) for file locations and trust behavior.
 
+## Extension-owned settings
+
+Extensions may register typed settings during their factory load. The setting definition supplies a lowercase namespaced key, a TypeBox schema, a default, and descriptive metadata. Keys are flat and must contain at least one dot, such as `example.display-mode`. See [Extension-owned settings](extensions.md#extension-owned-settings) for the extension API and lifecycle.
+
+Extension settings use the same two configuration scopes as core settings. The effective value is resolved from the project value, then the global value, then the registered default. Project values are ignored until the project is trusted. Writing a project value also requires project trust; global writes do not.
+
+The extension API does not expose the persisted `extensionSettings` object. `pi.getSettings()` returns a snapshot of core settings and redacts that object. The owning extension's setting handle is the only public read and mutation API for that setting.
+
+Stored extension values are strict JSON and are checked against the registered schema. An invalid project or global value is ignored, a diagnostic is reported, and resolution continues to the next layer or default. Optional select metadata allows a setting to appear in `/settings`; registration and handles remain available without UI metadata.
+
 ## Model and thinking
 
 <a id="model-cycling"></a>
