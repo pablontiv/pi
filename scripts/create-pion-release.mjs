@@ -11,6 +11,8 @@ import { findPackageDirectories } from "./package-workspaces.mjs";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SCRIPT_PATH), "..");
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+const CANONICAL_VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const DOWNSTREAM_VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-pion\.[1-9]\d*$/u;
 export const EXPECTED_PUBLIC_PACKAGES = Object.freeze({
 	"packages/agent": "@earendil-works/pi-agent-core",
 	"packages/ai": "@earendil-works/pi-ai",
@@ -28,23 +30,31 @@ export const EXPECTED_PUBLIC_PACKAGES = Object.freeze({
 });
 
 export function validatePionVersion(version) {
-	if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(version)) throw new Error(`Invalid Pion version: ${version}`);
+	if (!CANONICAL_VERSION_PATTERN.test(version) && !DOWNSTREAM_VERSION_PATTERN.test(version)) {
+		throw new Error(`Invalid Pion version: ${version}`);
+	}
 	return version;
 }
 
-export function validateUpstreamTag(tag, version) {
-	if (tag !== `v${validatePionVersion(version)}`) throw new Error(`Invalid upstream tag: ${tag}`);
+export function deriveUpstreamVersion(pionVersion) {
+	return validatePionVersion(pionVersion).replace(/-pion\.[1-9]\d*$/u, "");
+}
+
+export function validateUpstreamTag(tag, upstreamVersion) {
+	if (tag !== `v${upstreamVersion}` || !CANONICAL_VERSION_PATTERN.test(upstreamVersion)) {
+		throw new Error(`Invalid upstream tag: ${tag}`);
+	}
 	return tag;
 }
 
-export function createPionManifest(manifest, version) {
-	if (manifest.version !== version) {
-		throw new Error(`Pion version ${version} must match the upstream package version ${manifest.version}`);
+export function createPionManifest(manifest, pionVersion, upstreamVersion = deriveUpstreamVersion(pionVersion)) {
+	if (manifest.version !== upstreamVersion) {
+		throw new Error(`Upstream version ${upstreamVersion} must match the source package version ${manifest.version}`);
 	}
 	return {
 		...manifest,
 		name: "@pablontiv/pion",
-		version,
+		version: pionVersion,
 		private: true,
 		description: "Pion coding agent, a personal downstream distribution of Pi",
 		bin: { pion: "dist/bundle/cli.js" },
@@ -105,7 +115,7 @@ function isValidCalendarDate(value) {
 }
 
 export function validateReleaseSnapshot(root, version) {
-	validatePionVersion(version);
+	if (!CANONICAL_VERSION_PATTERN.test(version)) throw new Error(`Invalid upstream version: ${version}`);
 	const packages = findPackageDirectories(join(root, "packages"))
 		.map((absoluteDirectory) => {
 			const directory = relative(root, absoluteDirectory);
@@ -197,28 +207,31 @@ export function validateReleaseSnapshot(root, version) {
 	return { packages, releaseDate, unreleased };
 }
 
-export function createReleaseMetadata({ version, sourceCommit, upstreamTag }) {
-	validatePionVersion(version);
-	validateUpstreamTag(upstreamTag, version);
+export function createReleaseMetadata({ pionVersion, upstreamVersion, sourceCommit, upstreamTag }) {
+	validatePionVersion(pionVersion);
+	if (deriveUpstreamVersion(pionVersion) !== upstreamVersion) {
+		throw new Error(`Pion version ${pionVersion} does not derive upstream version ${upstreamVersion}`);
+	}
+	validateUpstreamTag(upstreamTag, upstreamVersion);
 	if (!SHA_PATTERN.test(sourceCommit)) throw new Error(`Invalid source commit: ${sourceCommit}`);
 	return {
-		tag: `pion-v${version}`,
-		package: `@pablontiv/pion@${version}`,
+		tag: `pion-v${pionVersion}`,
+		package: `@pablontiv/pion@${pionVersion}`,
 		executable: "pion",
 		sourceRepository: "https://github.com/pablontiv/pi",
 		sourceBranch: "dev",
 		sourceCommit,
 		upstreamTag,
-		upstreamVersion: version,
-		artifact: `pablontiv-pion-${version}.tgz`,
+		upstreamVersion,
+		artifact: `pablontiv-pion-${pionVersion}.tgz`,
 		npmRegistryPublished: false,
 	};
 }
 
-export function renderReleaseNotes({ version, artifact, snapshot, commitSubjects }) {
-	const tag = `pion-v${version}`;
+export function renderReleaseNotes({ pionVersion, upstreamVersion, upstreamTag, artifact, snapshot, commitSubjects }) {
+	const tag = `pion-v${pionVersion}`;
 	let notes =
-		`Pion is a personal downstream distribution of Pi ${version}.\n\n` +
+		`Pion ${pionVersion} is a personal downstream distribution of Pi ${upstreamVersion}.\n\n` +
 		`Install directly from this GitHub Release; it is not published to the npm registry:\n\n` +
 		"```sh\n" +
 		`npm install -g https://github.com/pablontiv/pi/releases/download/${tag}/${artifact}\n` +
@@ -229,19 +242,19 @@ export function renderReleaseNotes({ version, artifact, snapshot, commitSubjects
 			notes += `\n### ${section.name}\n\n${section.markdown}\n`;
 		}
 	}
-	notes += `\n## Commit subjects for v${version}..HEAD\n\n`;
+	notes += `\n## Commit subjects for ${upstreamTag}..HEAD\n\n`;
 	notes += commitSubjects.length > 0 ? `${commitSubjects.map((subject) => `- ${subject}`).join("\n")}\n` : "- No additional commits.\n";
 	return notes;
 }
 
-export function validateReleaseAssets({ out, version, sourceCommit, upstreamTag }) {
-	const artifact = `pablontiv-pion-${validatePionVersion(version)}.tgz`;
+export function validateReleaseAssets({ out, pionVersion, upstreamVersion, sourceCommit, upstreamTag }) {
+	const artifact = `pablontiv-pion-${validatePionVersion(pionVersion)}.tgz`;
 	const expectedNames = ["PION_RELEASE.json", "RELEASE_NOTES.md", "SHA256SUMS", artifact].sort();
 	const actualNames = readdirSync(out).sort();
 	if (actualNames.join("\n") !== expectedNames.join("\n")) {
 		throw new Error(`Unexpected release payload files: ${actualNames.join(", ")}`);
 	}
-	const expectedMetadata = createReleaseMetadata({ version, sourceCommit, upstreamTag });
+	const expectedMetadata = createReleaseMetadata({ pionVersion, upstreamVersion, sourceCommit, upstreamTag });
 	const actualMetadata = readJson(join(out, "PION_RELEASE.json"), "PION_RELEASE.json");
 	if (JSON.stringify(actualMetadata) !== JSON.stringify(expectedMetadata)) {
 		throw new Error("PION_RELEASE.json does not contain the exact expected metadata");
@@ -263,25 +276,27 @@ function parseArgs(args) {
 			result[argument.slice(2)] = args[++index];
 		} else throw new Error(`Unknown argument: ${argument}`);
 	}
-	if (!result.version) throw new Error("--version X.Y.Z is required");
-	result.version = validatePionVersion(result.version);
+	if (!result.version) throw new Error("--version X.Y.Z or X.Y.Z-pion.N is required");
+	result.pionVersion = validatePionVersion(result.version);
+	result.upstreamVersion = deriveUpstreamVersion(result.pionVersion);
+	delete result.version;
 	if (result.out) result.out = resolve(result.out);
 	return result;
 }
 
-export function createPionRelease({ out, version, upstreamTag, upstreamRef }) {
-	validateUpstreamTag(upstreamTag, version);
+export function createPionRelease({ out, pionVersion, upstreamVersion, upstreamTag, upstreamRef, sourceCommit }) {
+	validateUpstreamTag(upstreamTag, upstreamVersion);
 	if (!upstreamRef) throw new Error("An upstream ref is required to generate commit disclosure");
-	const snapshot = validateReleaseSnapshot(ROOT, version);
+	const snapshot = validateReleaseSnapshot(ROOT, upstreamVersion);
 	const packageDirectory = join(ROOT, "packages", "coding-agent");
 	const sourceManifest = readJson(join(packageDirectory, "package.json"), "packages/coding-agent/package.json");
-	const manifest = createPionManifest(sourceManifest, version);
+	const manifest = createPionManifest(sourceManifest, pionVersion, upstreamVersion);
 	if (!existsSync(join(packageDirectory, "dist", "bundle", "cli.js"))) {
 		throw new Error("Build packages/coding-agent before creating a Pion release");
 	}
 
 	mkdirSync(out, { recursive: true });
-	const expectedArtifact = join(out, `pablontiv-pion-${version}.tgz`);
+	const expectedArtifact = join(out, `pablontiv-pion-${pionVersion}.tgz`);
 	if (existsSync(expectedArtifact)) throw new Error(`Release artifact already exists: ${expectedArtifact}`);
 
 	const temporaryDirectory = mkdtempSync(join(tmpdir(), "pion-release-"));
@@ -297,22 +312,39 @@ export function createPionRelease({ out, version, upstreamTag, upstreamRef }) {
 		const artifact = pack(stagedPackage, out);
 		if (resolve(artifact) !== expectedArtifact) throw new Error(`Unexpected artifact filename: ${basename(artifact)}`);
 
-		const sourceCommit = run("git", ["rev-parse", "HEAD"], { cwd: ROOT }).trim();
+		const headCommit = run("git", ["rev-parse", "HEAD"], { cwd: ROOT }).trim();
+		if (sourceCommit && sourceCommit !== headCommit) {
+			throw new Error(`Source commit ${sourceCommit} does not match HEAD ${headCommit}`);
+		}
+		sourceCommit ??= headCommit;
 		const metadataPath = join(out, "PION_RELEASE.json");
-		writeFileSync(metadataPath, `${JSON.stringify(createReleaseMetadata({ version, sourceCommit, upstreamTag }), null, 2)}\n`);
+		writeFileSync(
+			metadataPath,
+			`${JSON.stringify(createReleaseMetadata({ pionVersion, upstreamVersion, sourceCommit, upstreamTag }), null, 2)}\n`,
+		);
 		const commitSubjects = run("git", ["log", "--format=%s", `${upstreamRef}..HEAD`], { cwd: ROOT })
 			.trim()
 			.split("\n")
 			.filter(Boolean);
 		const notesPath = join(out, "RELEASE_NOTES.md");
-		writeFileSync(notesPath, renderReleaseNotes({ version, artifact: basename(artifact), snapshot, commitSubjects }));
+		writeFileSync(
+			notesPath,
+			renderReleaseNotes({
+				pionVersion,
+				upstreamVersion,
+				upstreamTag,
+				artifact: basename(artifact),
+				snapshot,
+				commitSubjects,
+			}),
+		);
 		const checksumFiles = [artifact, metadataPath, notesPath];
 		writeFileSync(
 			join(out, "SHA256SUMS"),
 			`${checksumFiles.map((path) => `${sha256(path)}  ${basename(path)}`).join("\n")}\n`,
 		);
-		validateReleaseAssets({ out, version, sourceCommit, upstreamTag });
-		return { artifact, tag: `pion-v${version}` };
+		validateReleaseAssets({ out, pionVersion, upstreamVersion, sourceCommit, upstreamTag });
+		return { artifact, tag: `pion-v${pionVersion}` };
 	} finally {
 		rmSync(temporaryDirectory, { recursive: true, force: true });
 	}
@@ -321,28 +353,31 @@ export function createPionRelease({ out, version, upstreamTag, upstreamRef }) {
 if (resolve(process.argv[1] ?? "") === SCRIPT_PATH) {
 	const args = parseArgs(process.argv.slice(2));
 	if (args["validate-source"]) {
-		validateReleaseSnapshot(ROOT, args.version);
-		console.log(`Validated public workspace release ${args.version}.`);
+		validateReleaseSnapshot(ROOT, args.upstreamVersion);
+		console.log(`Validated public workspace release ${args.upstreamVersion} for Pion ${args.pionVersion}.`);
 	} else if (args["validate-assets"]) {
 		if (!args.out || !args["source-commit"] || !args["upstream-tag"]) {
 			throw new Error("--validate-assets requires --out, --source-commit, and --upstream-tag");
 		}
 		validateReleaseAssets({
 			out: args.out,
-			version: args.version,
+			pionVersion: args.pionVersion,
+			upstreamVersion: args.upstreamVersion,
 			sourceCommit: args["source-commit"],
 			upstreamTag: args["upstream-tag"],
 		});
-		console.log(`Validated Pion release assets for ${args.version}.`);
+		console.log(`Validated Pion release assets for ${args.pionVersion}.`);
 	} else {
 		if (!args.out || !args["upstream-tag"] || !args["upstream-ref"]) {
 			throw new Error("Creation requires --out, --upstream-tag, and --upstream-ref");
 		}
 		const result = createPionRelease({
 			out: args.out,
-			version: args.version,
+			pionVersion: args.pionVersion,
+			upstreamVersion: args.upstreamVersion,
 			upstreamTag: args["upstream-tag"],
 			upstreamRef: args["upstream-ref"],
+			sourceCommit: args["source-commit"],
 		});
 		console.log(`Created ${result.artifact}`);
 	}

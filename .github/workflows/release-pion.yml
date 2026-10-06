@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing Pion tag to recover (for example, pion-v1.0.2)"
+        description: "Existing Pion tag to recover (for example, pion-v1.0.4-pion.1)"
         required: true
         type: string
 
@@ -45,12 +45,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ ! "${RELEASE_TAG}" =~ ^pion-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Noncanonical Pion release tag: ${RELEASE_TAG}"
+          if [[ ! "${RELEASE_TAG}" =~ ^pion-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(-pion\.([1-9][0-9]*))?$ ]]; then
+            echo "::error::Invalid Pion release tag: ${RELEASE_TAG}"
             exit 1
           fi
-          version="${RELEASE_TAG#pion-v}"
-          upstream_tag="v${version}"
+          pion_version="${RELEASE_TAG#pion-v}"
+          upstream_version="${BASH_REMATCH[1]}"
+          upstream_tag="v${upstream_version}"
           release="$(gh api "repos/earendil-works/pi/releases/tags/${upstream_tag}")"
           jq -e --arg tag "${upstream_tag}" \
             '.tag_name == $tag and .draft == false and .prerelease == false' \
@@ -77,7 +78,7 @@ jobs:
           test "${tag_commit}" = "${head_commit}"
           git merge-base --is-ancestor "${upstream_commit}" "${tag_commit}"
           git merge-base --is-ancestor "${tag_commit}" "${dev_commit}"
-          node scripts/create-pion-release.mjs --validate-source --version "${version}"
+          node scripts/create-pion-release.mjs --validate-source --version "${pion_version}"
 
       - name: Install system dependencies
         run: |
@@ -106,24 +107,26 @@ jobs:
       - name: Create Pion artifact
         run: |
           set -euo pipefail
-          version="${RELEASE_TAG#pion-v}"
+          pion_version="${RELEASE_TAG#pion-v}"
+          upstream_version="${pion_version%%-pion.*}"
           node scripts/create-pion-release.mjs \
-            --version "${version}" \
-            --upstream-tag "v${version}" \
+            --version "${pion_version}" \
+            --upstream-tag "v${upstream_version}" \
             --upstream-ref refs/pion-upstream-release \
+            --source-commit "$(git rev-parse HEAD)" \
             --out release-assets
 
       - name: Smoke-test isolated install
         run: |
           set -euo pipefail
-          version="${RELEASE_TAG#pion-v}"
+          pion_version="${RELEASE_TAG#pion-v}"
           smoke_root="$(mktemp -d)"
           trap 'rm -rf "${smoke_root}"' EXIT
           cd "${smoke_root}"
           npm init -y >/dev/null
           npm install --ignore-scripts --omit=dev --no-audit --no-fund \
-            "${GITHUB_WORKSPACE}/release-assets/pablontiv-pion-${version}.tgz"
-          test "$(node_modules/.bin/pion --version)" = "${version}"
+            "${GITHUB_WORKSPACE}/release-assets/pablontiv-pion-${pion_version}.tgz"
+          test "$(node_modules/.bin/pion --version)" = "${pion_version}"
           node_modules/.bin/pion --help >/dev/null
 
       - name: Upload Pion release payload
@@ -170,11 +173,12 @@ jobs:
       - name: Validate Pion release payload
         run: |
           set -euo pipefail
-          version="${RELEASE_TAG#pion-v}"
+          pion_version="${RELEASE_TAG#pion-v}"
+          upstream_version="${pion_version%%-pion.*}"
           node scripts/create-pion-release.mjs \
             --validate-assets \
-            --version "${version}" \
-            --upstream-tag "v${version}" \
+            --version "${pion_version}" \
+            --upstream-tag "v${upstream_version}" \
             --source-commit "$(git rev-parse HEAD)" \
             --out release-assets
 
@@ -300,7 +304,10 @@ jobs:
             echo "::error::Draft GitHub Release asset set does not exactly match the four expected files."
             exit 1
           fi
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false >/dev/null
+          published="$(gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false -F prerelease=false)"
+          jq -e --argjson id "${RELEASE_ID}" --arg tag "${RELEASE_TAG}" \
+            '.id == $id and .tag_name == $tag and .draft == false and .prerelease == false' \
+            <<< "${published}" >/dev/null
 
   cleanup-draft-github-release:
     if: ${{ github.repository == 'pablontiv/pi' && always() && needs.stage-github-release.result != 'skipped' && needs.publish-github-release.result != 'success' }}
