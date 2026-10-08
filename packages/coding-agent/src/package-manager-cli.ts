@@ -35,7 +35,7 @@ import { DefaultResourceLoader, isBuiltinExtension } from "./core/resource-loade
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/child-process.ts";
-import { canonicalizePath, getCwdRelativePath } from "./utils/paths.ts";
+import { canonicalizePath } from "./utils/paths.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import {
 	formatVersionCheckError,
@@ -56,15 +56,19 @@ const DEFAULT_INSTALLER_API_BASE = "https://pi.dev/api/installer/releases";
 const MANAGED_INSTALL_MARKER = "managed-install.json";
 const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
-function getActiveManagedInstallRoot(): string | undefined {
+function getActiveManagedInstallPaths(): { managedRoot: string; releasesRoot: string } | undefined {
 	const configuredRoot = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
 	if (!configuredRoot) return undefined;
 
-	const managedRoot = resolve(configuredRoot);
-	const releasesDir = canonicalizePath(join(managedRoot, "releases"));
+	const packageDir = canonicalizePath(getPackageDir());
+	const packageNameParts = PACKAGE_NAME.split("/");
+	const activeReleaseDir = resolve(packageDir, ...packageNameParts.map(() => ".."), "..");
+	const releasesRoot = resolve(activeReleaseDir, "..");
+	const managedRoot = resolve(releasesRoot, "..");
 	// The launcher environment is inherited by child processes. Do not classify a
 	// source checkout or another Pi installation launched from managed Pi as managed.
-	if (getCwdRelativePath(canonicalizePath(getPackageDir()), releasesDir) === undefined) return undefined;
+	if (canonicalizePath(resolve(configuredRoot)) !== managedRoot) return undefined;
+	if (packageDir !== join(activeReleaseDir, "node_modules", ...packageNameParts)) return undefined;
 
 	const markerPath = join(managedRoot, MANAGED_INSTALL_MARKER);
 	try {
@@ -80,7 +84,7 @@ function getActiveManagedInstallRoot(): string | undefined {
 		throw new Error(`Managed install marker is missing or invalid: ${markerPath}`);
 	}
 
-	return managedRoot;
+	return { managedRoot, releasesRoot };
 }
 
 async function fetchInstallerArtifact(url: string, label: string): Promise<string> {
@@ -141,8 +145,7 @@ function activateManagedRelease(managedRoot: string, version: string): void {
 
 // Keep the active release and the one running this update, which other open
 // sessions likely still use and which allows rolling back by editing current-version.
-function pruneManagedReleases(managedRoot: string, activeVersion: string): void {
-	const releasesRoot = join(managedRoot, "releases");
+function pruneManagedReleases(releasesRoot: string, activeVersion: string): void {
 	let entries: string[];
 	try {
 		entries = readdirSync(releasesRoot);
@@ -173,18 +176,18 @@ function cleanupManagedStaging(managedRoot: string): void {
 }
 
 export function cleanupManagedInstall(): void {
-	let managedRoot: string | undefined;
+	let managedInstall: { managedRoot: string; releasesRoot: string } | undefined;
 	try {
-		managedRoot = getActiveManagedInstallRoot();
+		managedInstall = getActiveManagedInstallPaths();
 	} catch {
 		return;
 	}
-	if (!managedRoot) return;
+	if (!managedInstall) return;
 
 	try {
-		const releaseLock = lockfile.lockSync(join(managedRoot, "update"), { realpath: false });
+		const releaseLock = lockfile.lockSync(join(managedInstall.managedRoot, "update"), { realpath: false });
 		try {
-			cleanupManagedStaging(managedRoot);
+			cleanupManagedStaging(managedInstall.managedRoot);
 		} finally {
 			releaseLock();
 		}
@@ -193,7 +196,7 @@ export function cleanupManagedInstall(): void {
 	}
 }
 
-async function runManagedSelfUpdate(managedRoot: string, version: string): Promise<void> {
+async function runManagedSelfUpdate(managedRoot: string, releasesRoot: string, version: string): Promise<void> {
 	if (!MANAGED_RELEASE_VERSION_RE.test(version)) {
 		throw new Error(`Invalid managed release version: ${version}`);
 	}
@@ -217,13 +220,12 @@ async function runManagedSelfUpdate(managedRoot: string, version: string): Promi
 		);
 		const releaseUrl = `${installerApiBase}/${encodeURIComponent(version)}`;
 		const stagingRoot = join(managedRoot, "staging");
-		const releasesRoot = join(managedRoot, "releases");
 		mkdirSync(releasesRoot, { recursive: true });
 		const releaseDir = join(releasesRoot, version);
 		if (existsSync(releaseDir)) {
 			verifyManagedRelease(releaseDir, version);
 			activateManagedRelease(managedRoot, version);
-			pruneManagedReleases(managedRoot, version);
+			pruneManagedReleases(releasesRoot, version);
 			return;
 		}
 
@@ -240,7 +242,7 @@ async function runManagedSelfUpdate(managedRoot: string, version: string): Promi
 		verifyManagedRelease(stageDir, version);
 		renameSync(stageDir, releaseDir);
 		activateManagedRelease(managedRoot, version);
-		pruneManagedReleases(managedRoot, version);
+		pruneManagedReleases(releasesRoot, version);
 	} finally {
 		if (stageDir) rmSync(stageDir, { force: true, recursive: true });
 		await releaseLock();
@@ -1055,8 +1057,8 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const managedInstallRoot = getActiveManagedInstallRoot();
-					if (managedInstallRoot && options.force) {
+					const managedInstall = getActiveManagedInstallPaths();
+					if (managedInstall && options.force) {
 						console.error(
 							chalk.red(
 								`Managed ${APP_NAME} installations do not support --force; rerun the installer to repair this installation.`,
@@ -1069,13 +1071,17 @@ export async function handlePackageCommand(
 					if (!selfUpdatePlan.shouldRun) {
 						return true;
 					}
-					if (managedInstallRoot) {
+					if (managedInstall) {
 						if (selfUpdatePlan.note) {
 							printSelfUpdateNote(selfUpdatePlan.note);
 						}
 						try {
 							console.log(chalk.dim(`Updating managed ${APP_NAME} installation...`));
-							await runManagedSelfUpdate(managedInstallRoot, selfUpdatePlan.version);
+							await runManagedSelfUpdate(
+								managedInstall.managedRoot,
+								managedInstall.releasesRoot,
+								selfUpdatePlan.version,
+							);
 						} catch (error: unknown) {
 							const message = error instanceof Error ? error.message : "Unknown managed update error";
 							console.error(chalk.red(`Error: ${message}`));

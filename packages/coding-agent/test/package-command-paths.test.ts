@@ -6,6 +6,8 @@ import {
 	readFileSync,
 	realpathSync,
 	rmSync,
+	symlinkSync,
+	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
@@ -712,6 +714,46 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
 
 		expect(readdirSync(releasesRoot).sort()).toEqual([VERSION, "not-a-release", targetVersion].sort());
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("does not follow a replaced managed root symlink when pruning releases", async () => {
+		const targetVersion = getNewerPatchVersion();
+		const { managedRoot } = prepareManagedInstall(targetVersion);
+		const configuredRoot = join(tempDir, "configured-managed-root");
+		const externalRoot = join(tempDir, "external-managed-root");
+		const managedOldRelease = join(managedRoot, "releases", "0.0.1");
+		const externalOldRelease = join(externalRoot, "releases", "0.0.2");
+		mkdirSync(managedOldRelease, { recursive: true });
+		mkdirSync(externalOldRelease, { recursive: true });
+		writeFileSync(join(externalOldRelease, "outside.txt"), "outside");
+		symlinkSync(managedRoot, configuredRoot, process.platform === "win32" ? "junction" : "dir");
+		vi.stubEnv("PI_MANAGED_INSTALL_ROOT", configuredRoot);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (url === "https://pi.dev/api/latest-version") {
+					unlinkSync(configuredRoot);
+					symlinkSync(externalRoot, configuredRoot, process.platform === "win32" ? "junction" : "dir");
+					return Response.json({ packageName: PACKAGE_NAME, version: targetVersion });
+				}
+				const releaseUrl = `https://example.test/api/installer/releases/${targetVersion}`;
+				if (url === `${releaseUrl}/package.json` || url === `${releaseUrl}/package-lock.json`) {
+					return Response.json({});
+				}
+				throw new Error(`Unexpected fetch: ${url}`);
+			}),
+		);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+		expect(existsSync(managedOldRelease)).toBe(false);
+		expect(readFileSync(join(externalOldRelease, "outside.txt"), "utf8")).toBe("outside");
+		expect(readFileSync(join(managedRoot, "current-version"), "utf8")).toBe(`${targetVersion}\n`);
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
 	});
