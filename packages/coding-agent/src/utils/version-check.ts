@@ -1,9 +1,11 @@
 import { compare, valid } from "semver";
+import { PACKAGE_NAME } from "../config.ts";
 import { fetchWithRetry } from "./management-http.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
 const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
+const PION_PACKAGE_NAME = "@pablontiv/pion";
 
 export interface LatestPiRelease {
 	version: string;
@@ -52,6 +54,10 @@ export function isPionDownstreamVersion(version: string): boolean {
 	return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-pion\.[1-9]\d*$/u.test(version);
 }
 
+export function isPionDistribution(version: string, packageName: string = PACKAGE_NAME): boolean {
+	return packageName === PION_PACKAGE_NAME || isPionDownstreamVersion(version);
+}
+
 export async function getLatestPiRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number; retry?: boolean } = {},
@@ -98,8 +104,11 @@ export async function getLatestPiVersion(
 	return (await getLatestPiRelease(currentVersion, options))?.version;
 }
 
-export async function checkForNewPiVersion(currentVersion: string): Promise<LatestPiRelease | undefined> {
-	if (isPionDownstreamVersion(currentVersion) || process.env.PI_SKIP_VERSION_CHECK) return undefined;
+export async function checkForNewPiVersion(
+	currentVersion: string,
+	packageName: string = PACKAGE_NAME,
+): Promise<LatestPiRelease | undefined> {
+	if (isPionDistribution(currentVersion, packageName) || process.env.PI_SKIP_VERSION_CHECK) return undefined;
 
 	try {
 		const latestRelease = await getLatestPiRelease(currentVersion);

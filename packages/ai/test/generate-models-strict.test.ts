@@ -84,4 +84,53 @@ describe("strict model generation", () => {
 		);
 		expect(generatedPaths.map((path) => readFileSync(join(packageRoot, path), "utf8"))).toEqual(sourceBefore);
 	});
+
+	it("uses the canonical Claude Sonnet 5.5 cache-read cost in the fallback catalog", () => {
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-generate-models-fallback-"));
+		temporaryRoots.push(fixtureRoot);
+		const preloadPath = join(fixtureRoot, "mock-empty-catalogs.mjs");
+		const outputPath = join(fixtureRoot, "catalog");
+		writeFileSync(
+			preloadPath,
+			`globalThis.fetch = async (input) => {
+` +
+				`  const url = String(input);
+` +
+				`  if (url === "https://models.dev/api.json") return Response.json({});
+` +
+				`  if (url === "https://models.dev/models.json?type=decision") return Response.json({ "typesafe/jev-latest": { name: "Jev", type: "decision", limit: { context: 64000 } } });
+` +
+				`  if (url.startsWith("https://openrouter.ai/api/v1/models") || url === "https://ai-gateway.vercel.sh/v1/models") return Response.json({ data: [] });
+` +
+				`  if (url === "https://radius.pi.dev/v1/config") return Response.json({ baseUrl: "https://radius.pi.dev", models: [{ id: "test", name: "Test", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 4096 }] });
+` +
+				`  throw new Error(\`Unexpected fetch: \${url}\`);
+` +
+				`};
+`,
+		);
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				pathToFileURL(preloadPath).href,
+				"scripts/generate-models.ts",
+				"--json-only",
+				"--json-output",
+				outputPath,
+			],
+			{
+				cwd: packageRoot,
+				encoding: "utf8",
+				timeout: 10_000,
+			},
+		);
+
+		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+		const anthropicModels = JSON.parse(
+			readFileSync(join(outputPath, "providers", "anthropic.json"), "utf8"),
+		) as Record<string, { cost: { cacheRead: number } }>;
+		expect(anthropicModels["claude-sonnet-5-5"].cost.cacheRead).toBe(0.1);
+	});
 });

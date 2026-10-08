@@ -6,6 +6,7 @@ import {
 	getLatestPiRelease,
 	getLatestPiVersion,
 	isNewerPackageVersion,
+	isPionDistribution,
 	isPionDownstreamVersion,
 } from "../src/utils/version-check.ts";
 import { allowNetwork } from "./test-network-env.ts";
@@ -43,15 +44,27 @@ describe("version checks", () => {
 		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
 	});
 
-	it("does not check the Pi upstream channel for downstream Pion versions", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ version: "1.0.4" }));
+	it("does not check the Pi upstream channel for the canonical Pion package", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ version: "1.1.1" }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(checkForNewPiVersion("1.0.4-pion.1")).resolves.toBeUndefined();
+		await expect(checkForNewPiVersion("1.1.0", "@pablontiv/pion")).resolves.toBeUndefined();
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("recognizes only valid downstream Pion versions", async () => {
+	it("keeps the Pi upstream channel active for the canonical upstream package", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ version: "1.1.1" }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(checkForNewPiVersion("1.1.0", "@earendil-works/pi-coding-agent")).resolves.toEqual({
+			version: "1.1.1",
+		});
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("recognizes the Pion package and valid downstream Pion versions", async () => {
+		expect(isPionDistribution("1.1.0", "@pablontiv/pion")).toBe(true);
+		expect(isPionDistribution("1.1.0", "@earendil-works/pi-coding-agent")).toBe(false);
 		expect(isPionDownstreamVersion("1.0.4-pion.1")).toBe(true);
 		expect(isPionDownstreamVersion("1.0.4-pion.42")).toBe(true);
 
@@ -60,7 +73,11 @@ describe("version checks", () => {
 
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.0.4" }));
 		vi.stubGlobal("fetch", fetchMock);
-		for (const version of invalidVersions) await checkForNewPiVersion(version);
+		await checkForNewPiVersion("1.0.4-pion.1", "@earendil-works/pi-coding-agent");
+		expect(fetchMock).not.toHaveBeenCalled();
+		for (const version of invalidVersions) {
+			await checkForNewPiVersion(version, "@earendil-works/pi-coding-agent");
+		}
 		expect(fetchMock).toHaveBeenCalledTimes(invalidVersions.length);
 	});
 
