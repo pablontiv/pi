@@ -1,7 +1,6 @@
 {
   autoPatchelfHook,
   fd,
-  fetchurl,
   importNpmLock,
   lib,
   libxcb,
@@ -22,12 +21,10 @@ let
   # `npm run check`.
   installLock = source + "/packages/coding-agent/install-lock";
   modelCatalogPin = lib.importJSON ./model-catalog.json;
-  modelCatalog = fetchurl {
-    name = "pi-model-catalog.json";
-    # The typed catalog is the representation whose bytes the revision hashes.
-    url = "https://pi.dev/api/models/revisions/${modelCatalogPin.revision}?types=chat,image,classifier";
-    sha256 = lib.removePrefix "sha256-" modelCatalogPin.revision;
-  };
+  modelCatalogSnapshot = ./model-catalog.snapshot.json;
+  modelCatalog =
+    assert builtins.hashFile "sha256" modelCatalogSnapshot == lib.removePrefix "sha256-" modelCatalogPin.revision;
+    modelCatalogSnapshot;
 
   workspacePackages = stdenv.mkDerivation {
     pname = "pi-workspace-packages";

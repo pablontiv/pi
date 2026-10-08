@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
-import { hydratePinnedModelCatalog } from "./hydrate-pinned-model-catalog.mjs";
+import { hydratePinnedModelCatalog, MODEL_CATALOG_SNAPSHOT } from "./hydrate-pinned-model-catalog.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const model = {
@@ -41,64 +41,42 @@ function writePin(revision) {
 	writeFileSync(join(root, "nix/model-catalog.json"), `${JSON.stringify({ revision })}\n`);
 }
 
-function responseFor(body, status = 200) {
-	return async () => new Response(body, { status });
+function writeSnapshot(body) {
+	writeFileSync(join(root, "nix", MODEL_CATALOG_SNAPSHOT), body);
 }
 
-test("rejects an invalid pinned revision before fetching", async () => {
-	writePin("latest");
-	let fetched = false;
-	await assert.rejects(
-		hydratePinnedModelCatalog(root, {
-			fetchImpl: async () => {
-				fetched = true;
-				return new Response();
-			},
-		}),
-		/Invalid pin/,
-	);
-	assert.equal(fetched, false);
-});
-
-test("rejects a failed immutable revision response", async () => {
-	const body = catalog();
-	writePin(revisionOf(body));
-	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(null, 503) }), /HTTP 503/);
-});
-
-test("rejects catalog bytes with the wrong SHA-256 without mutation", async () => {
+test("rejects a missing snapshot", async () => {
 	writePin(revisionOf(catalog()));
-	await assert.rejects(
-		hydratePinnedModelCatalog(root, { fetchImpl: responseFor("wrong") }),
-		/does not match its content/,
-	);
+	await assert.rejects(hydratePinnedModelCatalog(root), /ENOENT/);
+});
+
+test("rejects an invalid pinned revision", async () => {
+	writePin("latest");
+	writeSnapshot(catalog());
+	await assert.rejects(hydratePinnedModelCatalog(root), /Invalid pin/);
+});
+
+test("rejects snapshot bytes with the wrong SHA-256 without mutation", async () => {
+	writePin(revisionOf(catalog()));
+	writeSnapshot("wrong");
+	await assert.rejects(hydratePinnedModelCatalog(root), /does not match pin/);
 	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
 });
 
 test("rejects invalid JSON after verifying its SHA-256 without mutation", async () => {
 	const body = "{";
 	writePin(revisionOf(body));
-	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(body) }), SyntaxError);
+	writeSnapshot(body);
+	await assert.rejects(hydratePinnedModelCatalog(root), SyntaxError);
 	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
 });
 
-test("downloads only the pinned HTTPS revision and hydrates it", async () => {
+test("hydrates the verified local snapshot", async () => {
 	const body = catalog();
 	const revision = revisionOf(body);
 	writePin(revision);
-	const requests = [];
-	assert.equal(
-		await hydratePinnedModelCatalog(root, {
-			fetchImpl: async (url, options) => {
-				requests.push([String(url), options]);
-				return new Response(body);
-			},
-		}),
-		revision,
-	);
-	assert.deepEqual(requests, [
-		[`https://pi.dev/api/models/revisions/${revision}?types=chat,image,classifier`, { redirect: "error" }],
-	]);
+	writeSnapshot(body);
+	assert.equal(await hydratePinnedModelCatalog(root), revision);
 	assert.equal(
 		readFileSync(join(root, "packages/ai/src/providers/data/test-provider.json"), "utf8"),
 		`${JSON.stringify({ "openai-completions": { "chat:model-a": model } })}\n`,
@@ -109,19 +87,39 @@ test("downloads only the pinned HTTPS revision and hydrates it", async () => {
 test("rejects an invalid catalog without mutation", async () => {
 	const body = catalog({ "other-provider": [model] });
 	writePin(revisionOf(body));
-	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(body) }), /missing provider/);
+	writeSnapshot(body);
+	await assert.rejects(hydratePinnedModelCatalog(root), /missing provider/);
 	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
 });
 
-test("release flows use pinned hydration and offline builds", () => {
+test("release flows use the local snapshot and offline builds", () => {
+	for (const relativePath of [
+		"scripts/hydrate-pinned-model-catalog.mjs",
+		"scripts/update-model-catalog-pin.mjs",
+		"nix/package.nix",
+	]) {
+		const localCatalogFlow = readFileSync(join(repositoryRoot, relativePath), "utf8");
+		assert.doesNotMatch(localCatalogFlow, /\bfetch(?:url)?\b|pi\.dev\/api\/models/);
+	}
+
+	for (const relativePath of [
+		".github/workflows/release-pion.yml",
+		".github/workflows/build-binaries.yml",
+		"scripts/local-release.mjs",
+		"scripts/release.mjs",
+	]) {
+		const releaseFlow = readFileSync(join(repositoryRoot, relativePath), "utf8");
+		assert.doesNotMatch(releaseFlow, /pi\.dev\/api\/models/);
+		assert.doesNotMatch(releaseFlow, /npm run generate:models/);
+		assert.doesNotMatch(releaseFlow, /npm run hydrate:model-data(?:\s|$)/m);
+		assert.doesNotMatch(releaseFlow, /npm run build(?:\s|$)/m);
+	}
+
 	const workflow = readFileSync(join(repositoryRoot, ".github/workflows/release-pion.yml"), "utf8");
 	assert.match(workflow, /^\s*run: npm run hydrate:model-data:pinned\s*$/m);
 	assert.match(workflow, /^\s*run: npm run build:offline\s*$/m);
-	assert.doesNotMatch(workflow, /^\s*run: npm run hydrate:model-data\s*$/m);
-	assert.doesNotMatch(workflow, /^\s*run: npm run build\s*$/m);
 
 	const localRelease = readFileSync(join(repositoryRoot, "scripts/local-release.mjs"), "utf8");
 	assert.match(localRelease, /\["run", "hydrate:model-data:pinned"\]/);
-	assert.doesNotMatch(localRelease, /\["run", "(?:generate:models|hydrate:model-data)"\]/);
 	assert.match(localRelease, /offlineModelData: true/);
 });

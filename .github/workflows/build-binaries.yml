@@ -52,7 +52,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Hydrate release model data
-        run: npm run hydrate:model-data
+        run: npm run hydrate:model-data:pinned
 
       - name: Create source archive
         run: |
@@ -372,8 +372,11 @@ jobs:
           chmod +x packages/env/bin/*/pi-env*
           ls -lR packages/env/bin
 
+      - name: Hydrate release model data
+        run: npm run hydrate:model-data:pinned
+
       - name: Build
-        run: npm run build
+        run: npm run build:offline
 
       - name: Check
         run: npm run check

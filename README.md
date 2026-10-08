@@ -63,10 +63,10 @@ nix run github:earendil-works/pi/stable
 
 Supports ARM64 and x86-64 on Linux and macOS. Use `nix build .` or `nix run .` to build or run your checkout.
 
-Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. The Nix workflow replaces the pin on `main` when it no longer matches the checkout, for example after a provider is added or gains a new model type. To refresh it by hand:
+Nix builds are offline, so the bundled model data comes from `nix/model-catalog.snapshot.json`. Its SHA-256 revision is pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. Download a typed catalog separately. Then validate and track it with this command:
 
 ```bash
-npm run update:model-catalog-pin
+npm run update:model-catalog-pin -- /path/to/models.all.json
 ```
 
 ## Packages

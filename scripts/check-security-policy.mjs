@@ -40,7 +40,7 @@ const UPSTREAM_ONLY_JOBS = {
   "issue-analysis.yml": ["authorize", "analyze"],
   "issue-gate.yml": ["check-contributor"],
   "issue-triage-labels.yml": ["update-labels"],
-  "nix.yml": ["pin", "build", "update-stable", "commit-pin"],
+  "nix.yml": ["pin", "build", "update-stable"],
   "pr-gate.yml": ["check-contributor"],
   "publish-model-catalog.yml": ["generate", "publish"],
   "remove-inprogress-on-close.yml": ["remove-label"],
