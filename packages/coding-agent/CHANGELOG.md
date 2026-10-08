@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Removed the extension APIs `registerSetting()` and `registerTranscriptPresentationPolicy()`. Extensions must use `registerToolRenderer().renderRow` to control interactive tool-row presentation.
+- Moved the published theme JSON Schema to `schemas/theme.schema.json` and made theme loading reject unknown top-level properties and unknown properties under `colors` or `export`. Update existing theme `$schema` references to the new path, define reusable custom colors under `vars`, and remove unsupported metadata.
 
 ### Changed
 
