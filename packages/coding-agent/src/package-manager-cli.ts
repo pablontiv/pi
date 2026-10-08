@@ -19,7 +19,6 @@ import {
 	CONFIG_DIR_NAME,
 	detectInstallMethod,
 	getAgentDir,
-	getPackageDir,
 	getRuntimePackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
@@ -750,7 +749,7 @@ function prepareWindowsNpmSelfUpdate(): void {
 		return;
 	}
 
-	const packageDir = getPackageDir();
+	const packageDir = getRuntimePackageDir();
 	cleanupWindowsSelfUpdateQuarantine(packageDir);
 	quarantineWindowsNativeDependencies(packageDir);
 }

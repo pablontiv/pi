@@ -623,6 +623,61 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		}
 	});
 
+	it("uses the runtime package directory for Windows quarantine cleanup", async () => {
+		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		const globalPrefix = join(tempDir, "global-prefix");
+		const assetPackageDir = join(globalPrefix, "node_modules", ...PACKAGE_NAME.split("/"));
+		const runtimePackageDir = join(tempDir, "runtime-prefix", "node_modules", ...PACKAGE_NAME.split("/"));
+		const assetQuarantine = join(globalPrefix, "node_modules", ".pi-native-quarantine");
+		const runtimeQuarantine = join(tempDir, "runtime-prefix", "node_modules", ".pi-native-quarantine");
+		const fakeNpmPath = join(tempDir, "fake-windows-npm.cjs");
+		mkdirSync(assetPackageDir, { recursive: true });
+		mkdirSync(runtimePackageDir, { recursive: true });
+		mkdirSync(assetQuarantine, { recursive: true });
+		mkdirSync(runtimeQuarantine, { recursive: true });
+		writeFileSync(join(assetQuarantine, "keep"), "keep");
+		writeFileSync(join(runtimeQuarantine, "remove-at-startup"), "remove");
+		writeFileSync(
+			fakeNpmPath,
+			`const args=process.argv.slice(2);if(args.includes("root"))console.log(${JSON.stringify(join(globalPrefix, "node_modules"))});`,
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath] }, null, 2),
+		);
+		process.env.PI_PACKAGE_DIR = assetPackageDir;
+		Object.defineProperty(process, "execPath", {
+			value: join(assetPackageDir, "dist", "cli.js"),
+			configurable: true,
+		});
+		vi.spyOn(config, "getRuntimePackageDir").mockReturnValue(runtimePackageDir);
+		const fetchMock = vi.fn(async () => {
+			expect(existsSync(runtimeQuarantine)).toBe(false);
+			expect(readFileSync(join(assetQuarantine, "keep"), "utf8")).toBe("keep");
+			mkdirSync(runtimeQuarantine, { recursive: true });
+			writeFileSync(join(runtimeQuarantine, "remove-before-update"), "remove");
+			return Response.json({ version: VERSION });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			await expect(main(["update", "--self", "--force"])).resolves.toBeUndefined();
+
+			expect(fetchMock).toHaveBeenCalledOnce();
+			expect(existsSync(runtimeQuarantine)).toBe(false);
+			expect(readFileSync(join(assetQuarantine, "keep"), "utf8")).toBe("keep");
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			if (platformDescriptor) {
+				Object.defineProperty(process, "platform", platformDescriptor);
+			}
+		}
+	});
+
 	it("allows explicit self-update checks when automatic version checks are disabled", async () => {
 		const previousSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
 		process.env.PI_SKIP_VERSION_CHECK = "1";
