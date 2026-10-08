@@ -100,7 +100,7 @@ export function detectInstallMethod(): InstallMethod {
 }
 
 function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
-	const packageDir = getPackageDir();
+	const packageDir = getRuntimePackageDir();
 	const path = process.platform === "win32" || packageDir.includes("\\") ? win32 : { basename, dirname };
 	const parent = path.dirname(packageDir);
 	let root: string | undefined;
@@ -131,7 +131,7 @@ function getSelfUpdateCommandForMethod(
 		case "pnpm": {
 			const match = readCommandOutput("pnpm", ["root", "-g"])
 				? undefined
-				: /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getPackageDir());
+				: /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getRuntimePackageDir());
 			const binDirArgs = match
 				? [`--config.global-bin-dir=${process.env.PNPM_HOME || dirname(dirname(match[1]))}`]
 				: [];
@@ -236,7 +236,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 		case "pnpm": {
 			const root = readCommandOutput("pnpm", ["root", "-g"]);
 			if (root) return [root, dirname(root)];
-			const match = /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getPackageDir());
+			const match = /^(.*[\\/]global[\\/][^\\/]+)[\\/]\.pnpm[\\/]/.exec(getRuntimePackageDir());
 			return match ? [match[1]] : [];
 		}
 		case "yarn": {

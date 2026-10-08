@@ -183,6 +183,33 @@ describe("detectInstallMethod", () => {
 		);
 	});
 
+	test("does not use the asset override as the inferred pnpm global bin directory", () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-pnpm-assets-"));
+		const externalPackageDir = join(
+			tempDir,
+			"pnpm",
+			"global",
+			"5",
+			".pnpm",
+			"@earendil-works+pi-coding-agent@1.1.0",
+			"node_modules",
+			"@earendil-works",
+			"pi-coding-agent",
+		);
+		mkdirSync(externalPackageDir, { recursive: true });
+		process.env.PI_PACKAGE_DIR = externalPackageDir;
+		process.env.PATH = tempDir;
+		setExecPath(join(tempDir, "pnpm", "node"));
+
+		const instruction = getUpdateInstruction("@earendil-works/pi-coding-agent");
+
+		expect(instruction).toBe(
+			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @earendil-works/pi-coding-agent",
+		);
+		expect(instruction).not.toContain("--config.global-bin-dir");
+		expect(instruction).not.toContain(externalPackageDir);
+	});
+
 	test("does not self-update unknown wrapper installs", () => {
 		setExecPath("/usr/local/bin/node");
 
@@ -193,31 +220,22 @@ describe("detectInstallMethod", () => {
 		);
 	});
 
-	test("self-updates npm installs from custom prefixes", () => {
+	test("does not use the asset override as the inferred npm prefix", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+		const instruction = getUpdateInstruction("@earendil-works/pi-coding-agent");
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(command).toEqual({
-			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@earendil-works/pi-coding-agent",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-coding-agent`,
-		});
+		expect(instruction).toBe(
+			"Run: npm install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-coding-agent",
+		);
+		expect(instruction).not.toContain(prefix);
 	});
 
 	test("self-updates exact npm versions without uninstalling the current package", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", undefined, {
+		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix], {
 			packageName: "@earendil-works/pi-coding-agent",
 			installSpec: "@earendil-works/pi-coding-agent@1.2.3",
 		});
@@ -240,7 +258,11 @@ describe("detectInstallMethod", () => {
 	test("self-updates renamed packages from the current install prefix", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+		const command = getSelfUpdateCommand(
+			"@mariozechner/pi-coding-agent",
+			["npm", "--prefix", prefix],
+			"@new-scope/pi",
+		);
 
 		expect(command).toEqual({
 			command: "npm",
@@ -281,26 +303,21 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-update treats empty npmCommand as unset", () => {
+	test("treats empty npmCommand as unset without using the asset override", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", []);
+		const instruction = getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent", []);
 
-		expect(command?.args).toEqual([
-			"--prefix",
-			prefix,
-			"install",
-			"-g",
-			"--ignore-scripts",
-			"--min-release-age=0",
-			"@earendil-works/pi-coding-agent",
-		]);
+		expect(instruction).toBe(
+			"This installation is not managed by a global npm install. Update it with the package manager, wrapper, or source checkout that provides it.",
+		);
+		expect(instruction).not.toContain(prefix);
 	});
 
-	test("quotes npm self-update display paths", () => {
+	test("quotes configured npm self-update display paths", () => {
 		const { prefix } = createNpmPrefixInstall("pi prefix ");
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]);
 
 		expect(command?.display).toBe(
 			`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 @earendil-works/pi-coding-agent`,
@@ -452,13 +469,13 @@ describe("detectInstallMethod", () => {
 	});
 
 	test("does not self-update when npm install path is not writable", () => {
-		const { packageDir } = createNpmPrefixInstall();
+		const { packageDir, prefix } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 
-		expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent")).toContain(
-			"the install path is not writable",
-		);
+		expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix])).toBeUndefined();
+		expect(
+			getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]),
+		).toContain("the install path is not writable");
 	});
 });
 
