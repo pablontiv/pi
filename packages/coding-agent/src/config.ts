@@ -390,6 +390,14 @@ export function findNodePackageDir(startDir: string): string {
 	return startDir;
 }
 
+export function getRuntimePackageDir(): string {
+	if (isBunBinary) {
+		// Bun binary: process.execPath points to the compiled executable
+		return dirname(process.execPath);
+	}
+	return findNodePackageDir(__dirname);
+}
+
 export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
 	const envDir = process.env.PI_PACKAGE_DIR;
@@ -397,11 +405,7 @@ export function getPackageDir(): string {
 		return normalizePath(envDir);
 	}
 
-	if (isBunBinary) {
-		// Bun binary: process.execPath points to the compiled executable
-		return dirname(process.execPath);
-	}
-	return findNodePackageDir(__dirname);
+	return getRuntimePackageDir();
 }
 
 /**

@@ -2,6 +2,7 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -15,7 +16,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
+import * as config from "../src/config.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { DefaultPackageManager, type ResolvedPaths } from "../src/core/package-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
@@ -25,6 +26,8 @@ import { ConfigSelectorComponent } from "../src/modes/interactive/components/con
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import { allowNetwork } from "./test-network-env.ts";
+
+const { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } = config;
 
 describe("package commands", () => {
 	let tempDir: string;
@@ -92,7 +95,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 
 		vi.stubEnv("PI_INSTALLER_API_BASE", "https://example.test/api/installer/releases");
 		vi.stubEnv("PI_MANAGED_INSTALL_ROOT", managedRoot);
-		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		vi.spyOn(config, "getRuntimePackageDir").mockReturnValue(selfPackageDir);
 		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
 		return { managedRoot, npmRecordPath };
 	}
@@ -138,7 +141,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 
 	beforeEach(() => {
 		allowNetwork();
-		tempDir = join(tmpdir(), `pi-package-commands-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDir = mkdtempSync(join(tmpdir(), "pi-package-commands-"));
 		agentDir = join(tempDir, "agent");
 		projectDir = join(tempDir, "project");
 		packageDir = join(tempDir, "local-package");
@@ -699,10 +702,13 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		expect(process.exitCode).toBeUndefined();
 	});
 
-	it("removes older managed releases after an update", async () => {
+	it("prunes the runtime managed root when PI_PACKAGE_DIR points outside it", async () => {
 		// https://github.com/earendil-works/pi/issues/10392
 		const targetVersion = getNewerPatchVersion();
 		const { managedRoot } = prepareManagedInstall(targetVersion);
+		const externalPackageDir = join(tempDir, "external-package-assets");
+		mkdirSync(externalPackageDir, { recursive: true });
+		process.env.PI_PACKAGE_DIR = externalPackageDir;
 		const releasesRoot = join(managedRoot, "releases");
 		mkdirSync(join(releasesRoot, "0.0.1", "node_modules"), { recursive: true });
 		mkdirSync(join(releasesRoot, "0.0.2-beta.1"), { recursive: true });

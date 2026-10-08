@@ -20,6 +20,7 @@ import {
 	detectInstallMethod,
 	getAgentDir,
 	getPackageDir,
+	getRuntimePackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	PACKAGE_NAME,
@@ -60,7 +61,7 @@ function getActiveManagedInstallPaths(): { managedRoot: string; releasesRoot: st
 	const configuredRoot = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
 	if (!configuredRoot) return undefined;
 
-	const packageDir = canonicalizePath(getPackageDir());
+	const packageDir = canonicalizePath(getRuntimePackageDir());
 	const packageNameParts = PACKAGE_NAME.split("/");
 	const activeReleaseDir = resolve(packageDir, ...packageNameParts.map(() => ".."), "..");
 	const releasesRoot = resolve(activeReleaseDir, "..");

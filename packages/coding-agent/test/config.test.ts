@@ -6,6 +6,8 @@ import {
 	detectInstallChange,
 	detectInstallMethod,
 	findNodePackageDir,
+	getPackageDir,
+	getRuntimePackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getUpdateInstruction,
@@ -157,6 +159,15 @@ describe("findNodePackageDir", () => {
 		writeFileSync(join(distDir, "package.json"), "{}");
 
 		expect(findNodePackageDir(bundleDir)).toBe(tempDir);
+	});
+
+	test("keeps runtime package detection independent from the asset override", () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-package-assets-"));
+		const runtimePackageDir = getRuntimePackageDir();
+		process.env.PI_PACKAGE_DIR = tempDir;
+
+		expect(getPackageDir()).toBe(tempDir);
+		expect(getRuntimePackageDir()).toBe(runtimePackageDir);
 	});
 });
 
