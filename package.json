@@ -28,6 +28,7 @@
 		"check:entry-graphs": "node scripts/check-entry-graphs.mjs",
 		"generate:models": "npm --prefix packages/ai run generate-models",
 		"hydrate:model-data": "npm --prefix packages/ai run hydrate-model-data",
+		"hydrate:model-data:pinned": "node scripts/hydrate-pinned-model-catalog.mjs",
 		"check:model-data": "npm --prefix packages/ai run check:model-data",
 		"generate:model-catalog": "npm --prefix packages/ai run generate-model-catalog",
 		"diff:model-catalog": "node scripts/diff-model-catalog.mjs",

@@ -90,10 +90,10 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Hydrate release model data
-        run: npm run hydrate:model-data
+        run: npm run hydrate:model-data:pinned
 
       - name: Build
-        run: npm run build
+        run: npm run build:offline
 
       - name: Check
         run: npm run check
