@@ -1,8 +1,5 @@
-#!/usr/bin/env node
-
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	createModelDataManifest,
 	groupProviderModelData,
@@ -77,19 +74,4 @@ export function hydrateModelCatalogData(
 	} finally {
 		rmSync(stagingRoot, { recursive: true, force: true });
 	}
-}
-
-/** Hydrate provider data from a catalog file without network access. */
-export function hydrateModelCatalog(
-	packageRoot: string,
-	catalogPath: string,
-	options: { validateOnly?: boolean } = {},
-): void {
-	const catalog: unknown = JSON.parse(readFileSync(catalogPath, "utf8"));
-	hydrateModelCatalogData(packageRoot, catalog, options);
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-	if (process.argv.length !== 3) throw new Error("Usage: node hydrate-model-catalog.ts <models.all.json>");
-	hydrateModelCatalog(join(dirname(fileURLToPath(import.meta.url)), ".."), resolve(process.argv[2]));
 }

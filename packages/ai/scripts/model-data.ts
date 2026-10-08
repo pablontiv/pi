@@ -319,18 +319,24 @@ export function groupProviderModelData<T extends ModelCatalogEntry>(
 	providerId: string,
 	models: readonly T[],
 ): { groups: Record<string, Record<string, T>>; structure: Record<string, string> } {
-	const groups: Record<string, Record<string, T>> = {};
-	const structure: Record<string, string> = {};
+	const groups = new Map<string, Map<string, T>>();
+	const structure = new Map<string, string>();
 	for (const api of Array.from(new Set(models.map((model) => model.api))).sort()) {
-		const group: Record<string, T> = {};
+		const group = new Map<string, T>();
 		for (const model of models) {
 			if (model.api !== api) continue;
 			const identity = `${model.type}:${model.id}`;
-			if (group[identity]) throw new Error(`${providerId}/${identity} has duplicate ${api} catalog entries`);
-			group[identity] = model;
-			structure[identity] = api;
+			if (group.has(identity)) throw new Error(`${providerId}/${identity} has duplicate ${api} catalog entries`);
+			if (structure.has(identity)) throw new Error(`${providerId}/${identity} appears in more than one API group`);
+			group.set(identity, model);
+			structure.set(identity, api);
 		}
-		groups[api] = group;
+		groups.set(api, group);
 	}
-	return { groups, structure };
+	return {
+		groups: Object.fromEntries(
+			Array.from(groups, ([api, group]): [string, Record<string, T>] => [api, Object.fromEntries(group)]),
+		),
+		structure: Object.fromEntries(structure),
+	};
 }

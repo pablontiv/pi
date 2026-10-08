@@ -2,10 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { hydrateModelCatalog, hydrateModelCatalogData } from "../scripts/hydrate-model-catalog.ts";
+import { hydrateModelCatalogData } from "../scripts/hydrate-model-catalog.ts";
 import {
 	assertExactModelIds,
 	createModelDataManifest,
+	groupProviderModelData,
 	MODEL_DATA_MANIFEST_FILE,
 	MODEL_DATA_SCHEMA_VERSION,
 	type ModelDataStructure,
@@ -88,50 +89,42 @@ describe("published model catalog hydration", () => {
 		const { dataDir, packageRoot, structure, values } = createFixture();
 		const aggregatorPath = join(packageRoot, "src", "models.generated.ts");
 		const aggregator = readFileSync(aggregatorPath, "utf8");
-		const catalogPath = join(packageRoot, "catalog.json");
 		const models = [chatModel(values)];
-		writeFileSync(catalogPath, JSON.stringify({ "test-provider": models, "extra-provider": models }));
+		const catalog = { "test-provider": models, "extra-provider": models };
 		rmSync(dataDir, { recursive: true });
 
-		hydrateModelCatalog(packageRoot, catalogPath);
+		hydrateModelCatalogData(packageRoot, catalog);
 		expect(() => validateModelDataDirectory(structure, dataDir)).not.toThrow();
 		expect(readModelDataStructure(packageRoot)).toEqual(structure);
 		expect(readFileSync(aggregatorPath, "utf8")).toBe(aggregator);
 		const manifest = readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8");
 		const provider = readFileSync(join(dataDir, "test-provider.json"), "utf8");
-		hydrateModelCatalog(packageRoot, catalogPath);
+		hydrateModelCatalogData(packageRoot, catalog);
 		expect(readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8")).toBe(manifest);
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(provider);
 	});
 
-	it("produces identical data from file and memory inputs", () => {
-		const fileFixture = createFixture();
-		const memoryFixture = createFixture();
-		const catalog = { "test-provider": [chatModel(fileFixture.values)] };
-		const catalogPath = join(fileFixture.packageRoot, "catalog.json");
-		writeFileSync(catalogPath, JSON.stringify(catalog));
+	it("produces identical data from separate in-memory inputs", () => {
+		const firstFixture = createFixture();
+		const secondFixture = createFixture();
+		const catalog = { "test-provider": [chatModel(firstFixture.values)] };
 
-		hydrateModelCatalog(fileFixture.packageRoot, catalogPath);
-		hydrateModelCatalogData(memoryFixture.packageRoot, catalog);
+		hydrateModelCatalogData(firstFixture.packageRoot, catalog);
+		hydrateModelCatalogData(secondFixture.packageRoot, catalog);
 
 		for (const filename of [MODEL_DATA_MANIFEST_FILE, "test-provider.json"]) {
-			expect(readFileSync(join(memoryFixture.dataDir, filename), "utf8")).toBe(
-				readFileSync(join(fileFixture.dataDir, filename), "utf8"),
+			expect(readFileSync(join(secondFixture.dataDir, filename), "utf8")).toBe(
+				readFileSync(join(firstFixture.dataDir, filename), "utf8"),
 			);
 		}
 	});
 
 	it("groups models by API and keys them by type and id", () => {
 		const { packageRoot, values } = createFixture();
-		const catalogPath = join(packageRoot, "catalog.json");
 		const model = chatModel(values);
-		writeFileSync(
-			catalogPath,
-			JSON.stringify({
-				"test-provider": [model, { ...model, id: "model-b", api: "anthropic-messages" }],
-			}),
-		);
-		hydrateModelCatalog(packageRoot, catalogPath);
+		hydrateModelCatalogData(packageRoot, {
+			"test-provider": [model, { ...model, id: "model-b", api: "anthropic-messages" }],
+		});
 		expect(readModelDataStructure(packageRoot)).toEqual({
 			"test-provider": { "chat:model-a": "openai-completions", "chat:model-b": "anthropic-messages" },
 		});
@@ -150,9 +143,7 @@ describe("published model catalog hydration", () => {
 			output: ["image"],
 			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 		};
-		const catalogPath = join(packageRoot, "catalog.json");
-		writeFileSync(catalogPath, JSON.stringify({ "test-provider": [chatModel(values), image] }));
-		hydrateModelCatalog(packageRoot, catalogPath);
+		hydrateModelCatalogData(packageRoot, { "test-provider": [chatModel(values), image] });
 		expect(readModelDataStructure(packageRoot)).toEqual({
 			"test-provider": { "chat:model-a": "openai-completions", "image:model-a": "openrouter-images" },
 		});
@@ -161,14 +152,13 @@ describe("published model catalog hydration", () => {
 	it("validates without replacing existing data", () => {
 		const { dataDir, packageRoot, values } = createFixture();
 		const original = readFileSync(join(dataDir, "test-provider.json"), "utf8");
-		const catalogPath = join(packageRoot, "catalog.json");
 		const model = chatModel(values);
 		const catalog = { "test-provider": [model, { ...model, id: "model-b" }] };
-		writeFileSync(catalogPath, JSON.stringify(catalog));
 		hydrateModelCatalogData(packageRoot, catalog, { validateOnly: true });
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(original);
-		writeFileSync(catalogPath, JSON.stringify({ "other-provider": [model] }));
-		expect(() => hydrateModelCatalog(packageRoot, catalogPath, { validateOnly: true })).toThrow(/missing provider/);
+		expect(() => hydrateModelCatalogData(packageRoot, { "other-provider": [model] }, { validateOnly: true })).toThrow(
+			/missing provider/,
+		);
 	});
 
 	it("rejects invalid in-memory catalog data without replacing existing data", () => {
@@ -182,10 +172,8 @@ describe("published model catalog hydration", () => {
 		"rejects incomplete catalogs without replacing existing data: %j",
 		(catalog) => {
 			const { dataDir, packageRoot } = createFixture();
-			const catalogPath = join(packageRoot, "catalog.json");
 			const original = readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8");
-			writeFileSync(catalogPath, JSON.stringify(catalog));
-			expect(() => hydrateModelCatalog(packageRoot, catalogPath)).toThrow();
+			expect(() => hydrateModelCatalogData(packageRoot, catalog)).toThrow();
 			expect(readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8")).toBe(original);
 		},
 	);
@@ -195,10 +183,52 @@ describe("published model catalog hydration", () => {
 		const original = readFileSync(join(dataDir, "test-provider.json"), "utf8");
 		const model = chatModel(values);
 		model[field] = null;
-		const catalogPath = join(packageRoot, "catalog.json");
-		writeFileSync(catalogPath, JSON.stringify({ "test-provider": [model] }));
-		expect(() => hydrateModelCatalog(packageRoot, catalogPath)).toThrow();
+		expect(() => hydrateModelCatalogData(packageRoot, { "test-provider": [model] })).toThrow();
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(original);
+	});
+});
+
+describe("model catalog API grouping", () => {
+	it("preserves special API names as own properties in stable serialized order", () => {
+		const models = [
+			{ type: "chat", id: "to-string", api: "toString" },
+			{ type: "chat", id: "constructor", api: "constructor" },
+			{ type: "chat", id: "proto", api: "__proto__" },
+		];
+		const { groups, structure } = groupProviderModelData("test-provider", models);
+
+		expect(Object.getPrototypeOf(groups)).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(structure)).toBe(Object.prototype);
+		for (const api of ["__proto__", "constructor", "toString"]) {
+			expect(Object.hasOwn(groups, api)).toBe(true);
+		}
+		expect(Object.keys(groups)).toEqual(["__proto__", "constructor", "toString"]);
+		expect(JSON.stringify(groups)).toBe(
+			'{"__proto__":{"chat:proto":{"type":"chat","id":"proto","api":"__proto__"}},"constructor":{"chat:constructor":{"type":"chat","id":"constructor","api":"constructor"}},"toString":{"chat:to-string":{"type":"chat","id":"to-string","api":"toString"}}}',
+		);
+		expect(structure).toEqual({
+			"chat:proto": "__proto__",
+			"chat:constructor": "constructor",
+			"chat:to-string": "toString",
+		});
+	});
+
+	it("rejects duplicate identities in one API group", () => {
+		expect(() =>
+			groupProviderModelData("test-provider", [
+				{ type: "chat", id: "duplicate", api: "__proto__" },
+				{ type: "chat", id: "duplicate", api: "__proto__" },
+			]),
+		).toThrow("duplicate __proto__ catalog entries");
+	});
+
+	it("rejects duplicate identities across API groups", () => {
+		expect(() =>
+			groupProviderModelData("test-provider", [
+				{ type: "chat", id: "duplicate", api: "constructor" },
+				{ type: "chat", id: "duplicate", api: "toString" },
+			]),
+		).toThrow("appears in more than one API group");
 	});
 });
 

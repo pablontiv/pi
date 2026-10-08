@@ -15,6 +15,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { hydrateModelCatalogData } from "../packages/ai/scripts/hydrate-model-catalog.ts";
 import { MODEL_CATALOG_SNAPSHOT } from "./hydrate-pinned-model-catalog.mjs";
 
+export const MODEL_CATALOG_INPUT = ".artifacts/model-catalog/models.all.json";
+
 function sha256(bytes) {
 	return `sha256-${createHash("sha256").update(bytes).digest("hex")}`;
 }
@@ -54,28 +56,27 @@ function replaceCatalogFiles(nixDir, snapshotBytes, pinBytes) {
 	}
 }
 
-/** Validate a local typed catalog and update the tracked snapshot and pin. */
-export async function updateModelCatalogPin(root, catalogPath) {
-	if (typeof catalogPath !== "string" || catalogPath.length === 0) throw new Error("A local catalog file is required");
-	const bytes = readFileSync(catalogPath);
-	const revision = sha256(bytes);
+/** Validate typed catalog bytes and update the tracked snapshot and pin. */
+export async function updateModelCatalogPin(root, catalogBytes) {
+	if (!Buffer.isBuffer(catalogBytes)) throw new Error("Local catalog bytes are required");
+	const revision = sha256(catalogBytes);
 	/** @type {unknown} */
-	const catalog = JSON.parse(bytes.toString("utf8"));
+	const catalog = JSON.parse(catalogBytes.toString("utf8"));
 	hydrateModelCatalogData(join(root, "packages/ai"), catalog, { validateOnly: true });
 
 	const nixDir = join(root, "nix");
 	const snapshotPath = join(nixDir, MODEL_CATALOG_SNAPSHOT);
 	const pinPath = join(nixDir, "model-catalog.json");
 	const pinBytes = Buffer.from(`${JSON.stringify({ revision }, null, 2)}\n`);
-	const updated = !sameBytes(snapshotPath, bytes) || !sameBytes(pinPath, pinBytes);
-	if (updated) replaceCatalogFiles(nixDir, bytes, pinBytes);
+	const updated = !sameBytes(snapshotPath, catalogBytes) || !sameBytes(pinPath, pinBytes);
+	if (updated) replaceCatalogFiles(nixDir, catalogBytes, pinBytes);
 	return { revision, updated };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-	const args = process.argv.slice(2);
-	if (args.length !== 1) throw new Error("Usage: node scripts/update-model-catalog-pin.mjs <catalog-file>");
+	if (process.argv.length !== 2) throw new Error("Usage: node scripts/update-model-catalog-pin.mjs");
 	const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-	const { revision, updated } = await updateModelCatalogPin(root, resolve(args[0]));
+	const catalogBytes = readFileSync(join(root, MODEL_CATALOG_INPUT));
+	const { revision, updated } = await updateModelCatalogPin(root, catalogBytes);
 	console.log(`${updated ? "Updated" : "Kept"} model catalog ${revision}`);
 }

@@ -119,6 +119,14 @@ test("release flows use the local snapshot and offline builds", () => {
 	assert.match(workflow, /^\s*run: npm run hydrate:model-data:pinned\s*$/m);
 	assert.match(workflow, /^\s*run: npm run build:offline\s*$/m);
 
+	const nixWorkflow = readFileSync(join(repositoryRoot, ".github/workflows/nix.yml"), "utf8");
+	assert.match(nixWorkflow, /^\s*npm run hydrate:model-data:pinned\s*$/m);
+	assert.doesNotMatch(nixWorkflow, /update-model-catalog-pin\.mjs\s+\S+/);
+
+	const nixPackage = readFileSync(join(repositoryRoot, "nix/package.nix"), "utf8");
+	assert.match(nixPackage, /^\s*npm run hydrate:model-data:pinned\s*$/m);
+	assert.doesNotMatch(nixPackage, /hydrate-model-catalog\.ts/);
+
 	const localRelease = readFileSync(join(repositoryRoot, "scripts/local-release.mjs"), "utf8");
 	assert.match(localRelease, /\["run", "hydrate:model-data:pinned"\]/);
 	assert.match(localRelease, /offlineModelData: true/);

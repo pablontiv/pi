@@ -20,12 +20,6 @@ let
   # runtime dependency tree and is kept in sync with package-lock.json by
   # `npm run check`.
   installLock = source + "/packages/coding-agent/install-lock";
-  modelCatalogPin = lib.importJSON ./model-catalog.json;
-  modelCatalogSnapshot = ./model-catalog.snapshot.json;
-  modelCatalog =
-    assert builtins.hashFile "sha256" modelCatalogSnapshot == lib.removePrefix "sha256-" modelCatalogPin.revision;
-    modelCatalogSnapshot;
-
   workspacePackages = stdenv.mkDerivation {
     pname = "pi-workspace-packages";
     inherit (packageJson) version;
@@ -41,7 +35,7 @@ let
 
     buildPhase = ''
       runHook preBuild
-      node packages/ai/scripts/hydrate-model-catalog.ts ${modelCatalog}
+      npm run hydrate:model-data:pinned
       npm run build:offline
       runHook postBuild
     '';
