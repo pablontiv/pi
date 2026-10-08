@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,13 +25,10 @@ const catalog = (value = { "test-provider": [model] }) => `${JSON.stringify(valu
 const revisionOf = (body) => `sha256-${createHash("sha256").update(body).digest("hex")}`;
 
 let root;
-let temporaryDirectory;
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "pi-pinned-hydration-test-"));
-	temporaryDirectory = join(root, "tmp");
 	mkdirSync(join(root, "nix"));
 	mkdirSync(join(root, "packages/ai/src/providers"), { recursive: true });
-	mkdirSync(temporaryDirectory);
 	writeFileSync(
 		join(root, "packages/ai/src/models.generated.ts"),
 		'import { TEST_PROVIDER_CLASSIFIER_MODELS, TEST_PROVIDER_IMAGE_MODELS, TEST_PROVIDER_MODELS } from "./providers/test-provider.models.ts";\n',
@@ -57,7 +54,6 @@ test("rejects an invalid pinned revision before fetching", async () => {
 				fetched = true;
 				return new Response();
 			},
-			temporaryDirectory,
 		}),
 		/Invalid pin/,
 	);
@@ -67,18 +63,23 @@ test("rejects an invalid pinned revision before fetching", async () => {
 test("rejects a failed immutable revision response", async () => {
 	const body = catalog();
 	writePin(revisionOf(body));
-	await assert.rejects(
-		hydratePinnedModelCatalog(root, { fetchImpl: responseFor(null, 503), temporaryDirectory }),
-		/HTTP 503/,
-	);
+	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(null, 503) }), /HTTP 503/);
 });
 
-test("rejects catalog bytes with the wrong SHA-256", async () => {
+test("rejects catalog bytes with the wrong SHA-256 without mutation", async () => {
 	writePin(revisionOf(catalog()));
 	await assert.rejects(
-		hydratePinnedModelCatalog(root, { fetchImpl: responseFor("wrong"), temporaryDirectory }),
+		hydratePinnedModelCatalog(root, { fetchImpl: responseFor("wrong") }),
 		/does not match its content/,
 	);
+	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
+});
+
+test("rejects invalid JSON after verifying its SHA-256 without mutation", async () => {
+	const body = "{";
+	writePin(revisionOf(body));
+	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(body) }), SyntaxError);
+	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
 });
 
 test("downloads only the pinned HTTPS revision and hydrates it", async () => {
@@ -92,7 +93,6 @@ test("downloads only the pinned HTTPS revision and hydrates it", async () => {
 				requests.push([String(url), options]);
 				return new Response(body);
 			},
-			temporaryDirectory,
 		}),
 		revision,
 	);
@@ -104,17 +104,13 @@ test("downloads only the pinned HTTPS revision and hydrates it", async () => {
 		`${JSON.stringify({ "openai-completions": { "chat:model-a": model } })}\n`,
 	);
 	assert.ok(readFileSync(join(root, "packages/ai/src/providers/data/.manifest.json"), "utf8").length > 0);
-	assert.deepEqual(readdirSync(temporaryDirectory), []);
 });
 
-test("cleans the temporary directory when hydration fails", async () => {
+test("rejects an invalid catalog without mutation", async () => {
 	const body = catalog({ "other-provider": [model] });
 	writePin(revisionOf(body));
-	await assert.rejects(
-		hydratePinnedModelCatalog(root, { fetchImpl: responseFor(body), temporaryDirectory }),
-		/missing provider/,
-	);
-	assert.deepEqual(readdirSync(temporaryDirectory), []);
+	await assert.rejects(hydratePinnedModelCatalog(root, { fetchImpl: responseFor(body) }), /missing provider/);
+	assert.equal(existsSync(join(root, "packages/ai/src/providers/data")), false);
 });
 
 test("release flows use pinned hydration and offline builds", () => {

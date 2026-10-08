@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { hydrateModelCatalog } from "../scripts/hydrate-model-catalog.ts";
+import { hydrateModelCatalog, hydrateModelCatalogData } from "../scripts/hydrate-model-catalog.ts";
 import {
 	assertExactModelIds,
 	createModelDataManifest,
@@ -104,6 +104,23 @@ describe("published model catalog hydration", () => {
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(provider);
 	});
 
+	it("produces identical data from file and memory inputs", () => {
+		const fileFixture = createFixture();
+		const memoryFixture = createFixture();
+		const catalog = { "test-provider": [chatModel(fileFixture.values)] };
+		const catalogPath = join(fileFixture.packageRoot, "catalog.json");
+		writeFileSync(catalogPath, JSON.stringify(catalog));
+
+		hydrateModelCatalog(fileFixture.packageRoot, catalogPath);
+		hydrateModelCatalogData(memoryFixture.packageRoot, catalog);
+
+		for (const filename of [MODEL_DATA_MANIFEST_FILE, "test-provider.json"]) {
+			expect(readFileSync(join(memoryFixture.dataDir, filename), "utf8")).toBe(
+				readFileSync(join(fileFixture.dataDir, filename), "utf8"),
+			);
+		}
+	});
+
 	it("groups models by API and keys them by type and id", () => {
 		const { packageRoot, values } = createFixture();
 		const catalogPath = join(packageRoot, "catalog.json");
@@ -146,11 +163,19 @@ describe("published model catalog hydration", () => {
 		const original = readFileSync(join(dataDir, "test-provider.json"), "utf8");
 		const catalogPath = join(packageRoot, "catalog.json");
 		const model = chatModel(values);
-		writeFileSync(catalogPath, JSON.stringify({ "test-provider": [model, { ...model, id: "model-b" }] }));
-		hydrateModelCatalog(packageRoot, catalogPath, { validateOnly: true });
+		const catalog = { "test-provider": [model, { ...model, id: "model-b" }] };
+		writeFileSync(catalogPath, JSON.stringify(catalog));
+		hydrateModelCatalogData(packageRoot, catalog, { validateOnly: true });
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(original);
 		writeFileSync(catalogPath, JSON.stringify({ "other-provider": [model] }));
 		expect(() => hydrateModelCatalog(packageRoot, catalogPath, { validateOnly: true })).toThrow(/missing provider/);
+	});
+
+	it("rejects invalid in-memory catalog data without replacing existing data", () => {
+		const { dataDir, packageRoot } = createFixture();
+		const original = readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8");
+		expect(() => hydrateModelCatalogData(packageRoot, { "test-provider": [{ id: "x" }] })).toThrow(/invalid entry/);
+		expect(readFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), "utf8")).toBe(original);
 	});
 
 	it.each([null, [], {}, { "test-provider": [] }, { "test-provider": {} }, { "test-provider": [{ id: "x" }] }])(

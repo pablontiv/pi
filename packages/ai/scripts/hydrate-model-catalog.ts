@@ -34,12 +34,11 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
  * (`models.all.json`) without network access. With `validateOnly`, stage and
  * validate the data without replacing the checkout's current data.
  */
-export function hydrateModelCatalog(
+export function hydrateModelCatalogData(
 	packageRoot: string,
-	catalogPath: string,
+	catalog: unknown,
 	options: { validateOnly?: boolean } = {},
 ): void {
-	const catalog: unknown = JSON.parse(readFileSync(catalogPath, "utf8"));
 	if (!isRecord(catalog)) throw new Error("Model catalog must be an object");
 
 	const files: Record<string, string> = {};
@@ -78,6 +77,16 @@ export function hydrateModelCatalog(
 	} finally {
 		rmSync(stagingRoot, { recursive: true, force: true });
 	}
+}
+
+/** Hydrate provider data from a catalog file without network access. */
+export function hydrateModelCatalog(
+	packageRoot: string,
+	catalogPath: string,
+	options: { validateOnly?: boolean } = {},
+): void {
+	const catalog: unknown = JSON.parse(readFileSync(catalogPath, "utf8"));
+	hydrateModelCatalogData(packageRoot, catalog, options);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { hydrateModelCatalog } from "../packages/ai/scripts/hydrate-model-catalog.ts";
+import { hydrateModelCatalogData } from "../packages/ai/scripts/hydrate-model-catalog.ts";
 import { readModelDataProviderIds } from "../packages/ai/scripts/model-data.ts";
 
 // Request the typed catalog; its bytes are what a revision hashes.
@@ -21,7 +20,9 @@ async function fetchRevision(revision) {
 	if (!response.ok) throw new Error(`Catalog revision ${revision} is unavailable: HTTP ${response.status}`);
 	const bytes = Buffer.from(await response.arrayBuffer());
 	if (sha256(bytes) !== revision) throw new Error(`Catalog revision ${revision} does not match its content`);
-	return bytes;
+	/** @type {unknown} */
+	const catalog = JSON.parse(bytes.toString("utf8"));
+	return catalog;
 }
 
 async function fetchLiveCatalog(root) {
@@ -44,27 +45,28 @@ async function fetchLiveCatalog(root) {
  * data, so code that uses a group (e.g. OPENCODE_CLASSIFIER_MODELS) only
  * type-checks when the catalog has models of that type for the provider.
  */
-function modelTypeGroups(root, bytes) {
-	const catalog = JSON.parse(bytes.toString("utf8"));
+function modelTypeGroups(root, catalog) {
 	const groups = new Set();
+	if (typeof catalog !== "object" || catalog === null || Array.isArray(catalog)) return groups;
 	for (const provider of readModelDataProviderIds(join(root, "packages/ai"))) {
-		for (const model of catalog[provider] ?? []) groups.add(`${provider}/${model.type}`);
+		const models = catalog[provider];
+		if (!Array.isArray(models)) continue;
+		for (const model of models) {
+			if (typeof model === "object" && model !== null && !Array.isArray(model) && typeof model.type === "string") {
+				groups.add(`${provider}/${model.type}`);
+			}
+		}
 	}
 	return groups;
 }
 
 /** Return why the catalog cannot hydrate this checkout, or undefined if it can. */
-function hydrationProblem(root, bytes) {
-	const directory = mkdtempSync(join(tmpdir(), "pi-model-catalog-pin-"));
+function hydrationProblem(root, catalog) {
 	try {
-		const catalogPath = join(directory, "models.all.json");
-		writeFileSync(catalogPath, bytes);
-		hydrateModelCatalog(join(root, "packages/ai"), catalogPath, { validateOnly: true });
+		hydrateModelCatalogData(join(root, "packages/ai"), catalog, { validateOnly: true });
 		return undefined;
 	} catch (error) {
 		return error instanceof Error ? error.message : String(error);
-	} finally {
-		rmSync(directory, { recursive: true, force: true });
 	}
 }
 
@@ -76,30 +78,30 @@ function hydrationProblem(root, bytes) {
 export async function updateModelCatalogPin(root, { ifStale = false } = {}) {
 	const pinPath = join(root, "nix/model-catalog.json");
 	const current = JSON.parse(readFileSync(pinPath, "utf8")).revision;
-	let currentBytes;
+	let currentCatalog;
 	if (ifStale) {
 		if (typeof current !== "string" || !REVISION_RE.test(current)) throw new Error(`Invalid pin in ${pinPath}`);
-		currentBytes = await fetchRevision(current);
-		const problem = hydrationProblem(root, currentBytes);
+		currentCatalog = await fetchRevision(current);
+		const problem = hydrationProblem(root, currentCatalog);
 		if (problem) {
 			console.error(`Pinned model catalog is stale: ${problem}`);
-			currentBytes = undefined;
+			currentCatalog = undefined;
 		}
 	}
 
 	const revision = await fetchLiveCatalog(root);
 	// Do not record a pin until its immutable URL serves a catalog this checkout can build with.
-	const bytes = await fetchRevision(revision);
-	if (currentBytes) {
+	const catalog = await fetchRevision(revision);
+	const problem = hydrationProblem(root, catalog);
+	if (problem) throw new Error(`Live model catalog ${revision} cannot hydrate this checkout: ${problem}`);
+	if (currentCatalog) {
 		// The live catalog is generated from main. Main's code may use a model type
 		// the pin lacks, e.g. after a provider gained classifier models.
-		const pinned = modelTypeGroups(root, currentBytes);
-		const missing = [...modelTypeGroups(root, bytes)].filter((group) => !pinned.has(group));
+		const pinned = modelTypeGroups(root, currentCatalog);
+		const missing = [...modelTypeGroups(root, catalog)].filter((group) => !pinned.has(group));
 		if (missing.length === 0) return { revision: current, updated: false };
 		console.error(`Pinned model catalog is stale: missing model types ${missing.sort().join(", ")}`);
 	}
-	const problem = hydrationProblem(root, bytes);
-	if (problem) throw new Error(`Live model catalog ${revision} cannot hydrate this checkout: ${problem}`);
 	writeFileSync(pinPath, `${JSON.stringify({ revision }, null, 2)}\n`);
 	return { revision, updated: revision !== current };
 }

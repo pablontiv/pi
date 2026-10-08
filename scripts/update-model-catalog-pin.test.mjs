@@ -36,11 +36,14 @@ delete classifier.reasoning;
 delete classifier.maxTokens;
 const classifierBody = catalog([model, classifier]);
 const classifierRevision = revisionOf(classifierBody);
+const invalidJsonBody = "{";
+const invalidJsonRevision = revisionOf(invalidJsonBody);
 const bodies = new Map([
 	[liveRevision, liveBody],
 	[currentRevision, currentBody],
 	[staleRevision, staleBody],
 	[classifierRevision, classifierBody],
+	[invalidJsonRevision, invalidJsonBody],
 ]);
 const typed = "types=chat,image,classifier";
 
@@ -131,6 +134,12 @@ test("replaces a pin that no longer hydrates the checkout", async (t) => {
 test("refuses to pin a live catalog that cannot hydrate the checkout", async () => {
 	mockPiDev({ live: staleRevision });
 	await assert.rejects(updateModelCatalogPin(root), /cannot hydrate this checkout/);
+	assert.equal(readPin(), pinFile(currentRevision));
+});
+
+test("keeps the old pin when verified immutable catalog JSON is invalid", async () => {
+	mockPiDev({ live: invalidJsonRevision });
+	await assert.rejects(updateModelCatalogPin(root), SyntaxError);
 	assert.equal(readPin(), pinFile(currentRevision));
 });
 
