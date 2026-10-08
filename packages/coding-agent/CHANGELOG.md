@@ -15,6 +15,7 @@
 
 - Downstream Pion release tarballs no longer declare source-only exports that are absent from the package.
 - Downstream Pion builds no longer check or offer updates from the Pi upstream release channel.
+- Fixed Mistral streams being aborted mid-generation (e.g. during long thinking) after the request timeout; the timeout now applies only to waiting for response headers ([#10609](https://github.com/earendil-works/pi/issues/10609))
 
 ## [1.1.0] - 2026-10-07
 
